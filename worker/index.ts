@@ -135,21 +135,63 @@ export default {
 
       // 6. /api/quote/xauusd
       if (path === '/api/quote/xauusd') {
-        const res = await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=PAXGUSDT');
-        if (!res.ok) throw new Error(`Binance error: ${res.status}`);
-        const data: any = await res.json();
+        let price = 0;
+        let high24h = 0;
+        let low24h = 0;
+        let change24h = 0;
+        let changePercent24h = 0;
+        let volume = 0;
+        let source = 'PAXG/USDT (1oz Gold Proxy)';
+
+        try {
+          const res = await fetch('https://data-api.binance.vision/api/v3/ticker/24hr?symbol=PAXGUSDT', {
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+          });
+          if (res.ok) {
+            const data: any = await res.json();
+            price = parseFloat(data.lastPrice);
+            high24h = parseFloat(data.highPrice);
+            low24h = parseFloat(data.lowPrice);
+            change24h = parseFloat(data.priceChange);
+            changePercent24h = parseFloat(data.priceChangePercent);
+            volume = parseFloat(data.volume);
+            source = 'Binance Vision PAXG/USDT 1oz Physical Gold Proxy';
+          } else {
+            throw new Error(`Binance Vision status: ${res.status}`);
+          }
+        } catch {
+          // Fallback to Yahoo Finance Gold Futures (GC=F)
+          const yRes = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1m&range=1d', {
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+          });
+          if (yRes.ok) {
+            const yData: any = await yRes.json();
+            const meta = yData.chart?.result?.[0]?.meta;
+            if (meta) {
+              price = meta.regularMarketPrice;
+              const prev = meta.previousClose || meta.chartPreviousClose || price;
+              change24h = price - prev;
+              changePercent24h = (change24h / prev) * 100;
+              high24h = meta.regularMarketDayHigh || price;
+              low24h = meta.regularMarketDayLow || price;
+              volume = meta.regularMarketVolume || 0;
+              source = 'Yahoo Finance COMEX Gold (GC=F)';
+            }
+          }
+        }
+
         return jsonResponse(
           {
-            symbol: 'OANDA:XAUUSD (Proxy: PAXG)',
-            price: parseFloat(data.lastPrice),
-            high24h: parseFloat(data.highPrice),
-            low24h: parseFloat(data.lowPrice),
-            change24h: parseFloat(data.priceChange),
-            changePercent24h: parseFloat(data.priceChangePercent),
-            volume: parseFloat(data.volume),
+            symbol: 'OANDA:XAUUSD',
+            price,
+            high24h,
+            low24h,
+            change24h,
+            changePercent24h,
+            volume,
             timestamp: Date.now(),
-            source: 'Binance PAXG/USDT 1oz Physical Gold Proxy',
-            status: 'live',
+            source,
+            status: price > 0 ? 'live' : 'fallback',
           },
           corsHeaders,
           3 // 3s edge cache
