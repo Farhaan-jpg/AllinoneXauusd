@@ -1,0 +1,19 @@
+name = "gold-intelligence-terminal"
+main = "worker/index.ts"
+compatibility_date = "2024-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Cloudflare Free Tier Static Assets
+[assets]
+directory = "./dist"
+
+# Optional Cloudflare D1 Database Binding
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "gold_intel_db"
+# database_id = "your-d1-database-id"
+
+# Optional Cloudflare KV Namespace Binding
+# [[kv_namespaces]]
+# binding = "KV"
+# id = "your-kv-namespace-id"
