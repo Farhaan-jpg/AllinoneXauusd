@@ -41,6 +41,17 @@ export default defineConfig({
           'User-Agent': 'GoldIntelligenceTerminal/1.0',
         },
       },
+      '/api/tv-calendar': {
+        target: 'https://economic-calendar.tradingview.com',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/tv-calendar/, ''),
+        headers: {
+          'Origin': 'https://www.tradingview.com',
+          'Referer': 'https://www.tradingview.com/',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        },
+      },
     },
   },
 })
+

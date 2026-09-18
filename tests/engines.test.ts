@@ -174,4 +174,13 @@ describe('NewsProvider Classifier', () => {
     expect(res.category).toBe('GEOPOLITICAL');
     expect(res.relevance).toBe('HIGH');
   });
+
+  it('correctly categorizes Al Jazeera and BBC World dispatches into GEOPOLITICAL', () => {
+    const ajRes = newsProvider.classifyArticle('Diplomatic Summit Concludes Without Ceasefire Accord', 'Al Jazeera');
+    expect(ajRes.category).toBe('GEOPOLITICAL');
+
+    const bbcRes = newsProvider.classifyArticle('UN Security Council Convenes Emergency Session', 'BBC World');
+    expect(bbcRes.category).toBe('GEOPOLITICAL');
+  });
 });
+

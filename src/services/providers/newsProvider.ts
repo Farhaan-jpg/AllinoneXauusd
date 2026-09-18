@@ -14,76 +14,99 @@ class NewsProvider {
 
     const startTime = performance.now();
     try {
-      let xml = '';
+      let articles: NewsArticle[] | null = null;
 
-      // 1. Try local dev proxy / worker proxy
+      // 1. Try aggregated /api/news endpoint (Cloudflare Worker & local edge proxy)
       try {
-        const proxyRes = await fetch('/api/yahoo-rss/rss/2.0/headline?s=GC=F,GLD,XAUUSD=X&region=US&lang=en-US');
-        if (proxyRes.ok) {
-          const t = await proxyRes.text();
-          if (t.includes('<item>')) {
-            xml = t;
+        const apiRes = await fetch('/api/news');
+        if (apiRes.ok) {
+          const ct = apiRes.headers.get('content-type') || '';
+          if (ct.includes('json')) {
+            const data = await apiRes.json();
+            if (Array.isArray(data) && data.length > 0) {
+              articles = data.map((item: any, idx: number) => ({
+                ...item,
+                id: item.id || `news_${item.publishedAt || now}_${idx}`,
+                publishedFormatted: this.formatRelativeTime(item.publishedAt || now),
+              }));
+            }
           }
         }
       } catch {
         // ignore
       }
 
-      // 2. Try direct URL
-      if (!xml) {
-        try {
-          const directRes = await fetch('https://feeds.finance.yahoo.com/rss/2.0/headline?s=GC=F,GLD,XAUUSD=X&region=US&lang=en-US');
-          if (directRes.ok) {
-            xml = await directRes.text();
-          }
-        } catch {
-          // ignore
+      // 2. Direct parallel fetch across reputed publishers if /api/news was not available
+      if (!articles || articles.length === 0) {
+        const feeds = [
+          { url: 'https://www.aljazeera.com/xml/rss/all.xml', source: 'Al Jazeera' },
+          { url: 'https://feeds.bbci.co.uk/news/world/rss.xml', source: 'BBC World' },
+          { url: 'https://feeds.bbci.co.uk/news/business/rss.xml', source: 'BBC Business' },
+          { url: 'https://www.investing.com/rss/commodities.rss', source: 'Investing.com' },
+          { url: 'https://www.investing.com/rss/news.rss', source: 'Investing.com' },
+          { url: '/api/yahoo-rss/rss/2.0/headline?s=GC=F,GLD,XAUUSD=X&region=US&lang=en-US', source: 'Yahoo Finance' },
+        ];
+
+        const rawList: { title: string; link: string; timestamp: number; source: string }[] = [];
+
+        await Promise.allSettled(
+          feeds.map(async (f) => {
+            try {
+              const res = await fetch(f.url);
+              if (res.ok) {
+                const xml = await res.text();
+                rawList.push(...this.parseRssXml(xml, f.source));
+              }
+            } catch {
+              // ignore individual feed errors
+            }
+          })
+        );
+
+        // Deduplicate
+        const seenHeadlines = new Set<string>();
+        const deduplicated: NewsArticle[] = [];
+
+        for (const raw of rawList) {
+          const cleanTitle = this.cleanText(raw.title);
+          const normKey = cleanTitle.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 45);
+
+          if (seenHeadlines.has(normKey)) continue;
+          seenHeadlines.add(normKey);
+
+          const { category, relevance, comment } = this.classifyArticle(cleanTitle, raw.source);
+
+          deduplicated.push({
+            id: `news_${raw.timestamp}_${deduplicated.length}`,
+            headline: cleanTitle,
+            source: raw.source,
+            url: raw.link,
+            publishedAt: raw.timestamp,
+            publishedFormatted: this.formatRelativeTime(raw.timestamp),
+            category,
+            relevance,
+            marketRelevanceComment: comment,
+          });
         }
+
+        articles = deduplicated;
       }
 
-      const rawArticles = xml ? this.parseRssXml(xml) : [];
-
-      // Deduplicate by normalized headline
-      const seenHeadlines = new Set<string>();
-      const deduplicated: NewsArticle[] = [];
-
-      for (const raw of rawArticles) {
-        const cleanTitle = this.cleanText(raw.title);
-        const normKey = cleanTitle.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 40);
-
-        if (seenHeadlines.has(normKey)) continue;
-        seenHeadlines.add(normKey);
-
-        const { category, relevance, comment } = this.classifyArticle(cleanTitle);
-
-        deduplicated.push({
-          id: `news_${raw.timestamp}_${deduplicated.length}`,
-          headline: cleanTitle,
-          source: raw.source || 'Financial News',
-          url: raw.link,
-          publishedAt: raw.timestamp,
-          publishedFormatted: this.formatRelativeTime(raw.timestamp),
-          category,
-          relevance,
-          marketRelevanceComment: comment,
-        });
-      }
-
-      // If RSS returns very few, append curated institutional macroeconomic news headlines
-      if (deduplicated.length < 5) {
-        deduplicated.push(...this.getCuratedFallbackNews());
+      // If feed was completely empty, append curated fallback headlines
+      if (!articles || articles.length === 0) {
+        articles = this.getCuratedFallbackNews();
       }
 
       // Sort newest first
-      deduplicated.sort((a, b) => b.publishedAt - a.publishedAt);
+      articles.sort((a, b) => b.publishedAt - a.publishedAt);
 
-      this.cache = deduplicated;
+      this.cache = articles;
       this.lastFetchTime = now;
 
       const latency = Math.round(performance.now() - startTime);
       providerStatusManager.updateLatency('news_feed', latency, 'healthy');
 
-      return deduplicated;
+      return articles;
     } catch (err) {
       console.warn('News fetch error:', err);
       providerStatusManager.markError('news_feed', String(err));
@@ -94,8 +117,8 @@ class NewsProvider {
     }
   }
 
-  private parseRssXml(xml: string): { title: string; link: string; timestamp: number; source?: string }[] {
-    const items: { title: string; link: string; timestamp: number; source?: string }[] = [];
+  private parseRssXml(xml: string, defaultSource: string = 'Financial News'): { title: string; link: string; timestamp: number; source: string }[] {
+    const items: { title: string; link: string; timestamp: number; source: string }[] = [];
     const itemMatches = xml.matchAll(/<item>([\s\S]*?)<\/item>/g);
 
     for (const match of itemMatches) {
@@ -103,16 +126,14 @@ class NewsProvider {
       const titleMatch = content.match(/<title>([\s\S]*?)<\/title>/);
       const linkMatch = content.match(/<link>([\s\S]*?)<\/link>/);
       const pubDateMatch = content.match(/<pubDate>([\s\S]*?)<\/pubDate>/);
-      const sourceMatch = content.match(/<source[^>]*>([\s\S]*?)<\/source>/);
 
       if (titleMatch && linkMatch) {
         const title = titleMatch[1].replace(/<!\[CDATA\[(.*?)\]\]>/g, '$1').trim();
         const link = linkMatch[1].replace(/<!\[CDATA\[(.*?)\]\]>/g, '$1').trim();
         const pubDateStr = pubDateMatch ? pubDateMatch[1].trim() : '';
         const timestamp = pubDateStr ? new Date(pubDateStr).getTime() : Date.now();
-        const source = sourceMatch ? sourceMatch[1].trim() : 'Yahoo Finance / Reuters';
 
-        items.push({ title, link, timestamp, source });
+        items.push({ title, link, timestamp, source: defaultSource });
       }
     }
 
@@ -129,7 +150,7 @@ class NewsProvider {
       .trim();
   }
 
-  public classifyArticle(headline: string): {
+  public classifyArticle(headline: string, source: string = 'Financial News'): {
     category: NewsArticle['category'];
     relevance: NewsArticle['relevance'];
     comment: string;
@@ -139,32 +160,41 @@ class NewsProvider {
     // Classification
     let category: NewsArticle['category'] = 'GLOBAL';
     let relevance: NewsArticle['relevance'] = 'LOW';
-    let comment = 'General market headline; watch for peripheral sentiment shifts.';
+    let comment = 'General market headline; watch for broader macro risk sentiment.';
 
-    if (text.includes('fomc') || text.includes('powell') || text.includes('federal reserve') || text.includes('fed rate') || text.includes('interest rate')) {
+    if (text.includes('fomc') || text.includes('powell') || text.includes('federal reserve') || text.includes('fed rate') || text.includes('interest rate') || text.includes('rate cut') || text.includes('central bank')) {
       category = 'FED';
       relevance = text.includes('decision') || text.includes('cut') || text.includes('hike') || text.includes('unexpected') ? 'CRITICAL' : 'HIGH';
       comment = 'Historically triggers direct adjustments in USD index and Gold intraday volatility.';
-    } else if (text.includes('cpi') || text.includes('inflation') || text.includes('pce') || text.includes('ppi')) {
+    } else if (text.includes('cpi') || text.includes('inflation') || text.includes('pce') || text.includes('ppi') || text.includes('cost of living')) {
       category = 'INFLATION';
       relevance = text.includes('accelerates') || text.includes('surges') || text.includes('surprise') ? 'CRITICAL' : 'HIGH';
       comment = 'Key driver of US real yields and purchasing power expectations for bullion.';
-    } else if (text.includes('nfp') || text.includes('payrolls') || text.includes('jobless') || text.includes('employment') || text.includes('retail sales') || text.includes('gdp')) {
-      category = 'US DATA';
-      relevance = text.includes('nfp') || text.includes('payrolls') ? 'HIGH' : 'MEDIUM';
-      comment = 'High statistical relevance to US Treasury 10-year yield direction.';
+    } else if (
+      source === 'Al Jazeera' ||
+      source === 'BBC World' ||
+      text.includes('war') || text.includes('conflict') || text.includes('middle east') || text.includes('sanction') ||
+      text.includes('iran') || text.includes('israel') || text.includes('lebanon') || text.includes('gaza') ||
+      text.includes('russia') || text.includes('ukraine') || text.includes('china') || text.includes('taiwan') ||
+      text.includes('geopolitical') || text.includes('missile') || text.includes('military') || text.includes('houthis') ||
+      text.includes('red sea') || text.includes('strait') || text.includes('strike') || text.includes('attack') ||
+      text.includes('ceasefire') || text.includes('treaty')
+    ) {
+      category = 'GEOPOLITICAL';
+      relevance = text.includes('strike') || text.includes('missile') || text.includes('escalate') || text.includes('escalating') || text.includes('sanction') ? 'HIGH' : 'MEDIUM';
+      comment = 'Safe-haven hedge demand historically causes sharp upward liquidity spikes in XAUUSD.';
+    } else if (text.includes('gold') || text.includes('bullion') || text.includes('central bank gold') || text.includes('gld') || text.includes('xau') || text.includes('silver') || text.includes('precious metal')) {
+      category = 'GOLD-SPECIFIC';
+      relevance = text.includes('central bank') || text.includes('record') || text.includes('outflow') ? 'HIGH' : 'MEDIUM';
+      comment = 'Direct institutional supply/demand and reserve allocation metric.';
     } else if (text.includes('treasury') || text.includes('yield') || text.includes('bond') || text.includes('10-year') || text.includes('2-year')) {
       category = 'YIELDS';
       relevance = 'HIGH';
       comment = 'Treasury yields represent the opportunity cost of holding non-yielding gold.';
-    } else if (text.includes('gold') || text.includes('bullion') || text.includes('central bank gold') || text.includes('gld') || text.includes('xau')) {
-      category = 'GOLD-SPECIFIC';
-      relevance = text.includes('central bank') || text.includes('record') || text.includes('outflow') ? 'HIGH' : 'MEDIUM';
-      comment = 'Direct institutional supply/demand and reserve allocation metric.';
-    } else if (text.includes('war') || text.includes('conflict') || text.includes('middle east') || text.includes('sanction') || text.includes('iran') || text.includes('israel') || text.includes('russia') || text.includes('china') || text.includes('geopolitical') || text.includes('strait')) {
-      category = 'GEOPOLITICAL';
-      relevance = text.includes('strike') || text.includes('escalate') || text.includes('escalating') || text.includes('sanction') ? 'HIGH' : 'MEDIUM';
-      comment = 'Safe-haven hedge demand may cause rapid intraday liquidity sweeps in XAUUSD.';
+    } else if (text.includes('nfp') || text.includes('payrolls') || text.includes('jobless') || text.includes('employment') || text.includes('retail sales') || text.includes('gdp') || text.includes('pmi')) {
+      category = 'US DATA';
+      relevance = text.includes('nfp') || text.includes('payrolls') ? 'HIGH' : 'MEDIUM';
+      comment = 'High statistical relevance to US Treasury 10-year yield direction.';
     }
 
     return { category, relevance, comment };
@@ -186,47 +216,69 @@ class NewsProvider {
     return [
       {
         id: 'curated_1',
-        headline: 'Federal Reserve Monetary Policy Committee Monitors Core Inflation & Yield Curve Dynamics',
-        source: 'Federal Reserve Communications',
-        url: 'https://www.federalreserve.gov',
-        publishedAt: now - 1800000,
-        publishedFormatted: '30m ago',
-        category: 'FED',
-        relevance: 'HIGH',
-        marketRelevanceComment: 'Monetary policy expectations remain the primary anchor for XAUUSD macro valuation.',
+        headline: 'Middle East Regional Escalation Fears Drive Heavy Safe-Haven Bids into Spot Gold',
+        source: 'Al Jazeera',
+        url: 'https://www.aljazeera.com',
+        publishedAt: now - 900000,
+        publishedFormatted: '15m ago',
+        category: 'GEOPOLITICAL',
+        relevance: 'CRITICAL',
+        marketRelevanceComment: 'Heightened geopolitical risk premiums prevent major intraday corrections in gold.',
       },
       {
         id: 'curated_2',
-        headline: 'Global Central Banks Report Continued Official Gold Reserve Accumulation for Q3',
-        source: 'World Gold Council',
-        url: 'https://www.gold.org',
+        headline: 'Red Sea Maritime Tensions and Strait Security Spark Fresh Supply Chain Concerns',
+        source: 'BBC World',
+        url: 'https://www.bbc.com/news/world',
+        publishedAt: now - 1800000,
+        publishedFormatted: '30m ago',
+        category: 'GEOPOLITICAL',
+        relevance: 'HIGH',
+        marketRelevanceComment: 'Strategic shipping choke-point risk supports commodity and bullion bids.',
+      },
+      {
+        id: 'curated_3',
+        headline: 'Federal Reserve Policy Path in Focus as Traders Price in Further Rate Adjustments',
+        source: 'BBC Business',
+        url: 'https://www.bbc.com/news/business',
+        publishedAt: now - 3600000,
+        publishedFormatted: '1h ago',
+        category: 'FED',
+        relevance: 'HIGH',
+        marketRelevanceComment: 'Interest rate trajectory directly impacts non-yielding bullion opportunity cost.',
+      },
+      {
+        id: 'curated_4',
+        headline: 'Gold Holds Near Highs as Central Bank Purchases and ETF Inflows Accelerate',
+        source: 'Investing.com',
+        url: 'https://www.investing.com/commodities/gold',
         publishedAt: now - 7200000,
         publishedFormatted: '2h ago',
         category: 'GOLD-SPECIFIC',
         relevance: 'HIGH',
-        marketRelevanceComment: 'Sovereign reserve diversification provides ongoing underlying structural support.',
+        marketRelevanceComment: 'Sovereign institutional accumulation provides durable baseline demand.',
       },
       {
-        id: 'curated_3',
-        headline: 'US 10-Year Treasury Yields Consolidate Near Crucial Technical Pivot Levels',
-        source: 'Financial Markets Desk',
-        url: 'https://www.treasury.gov',
+        id: 'curated_5',
+        headline: 'US Treasury Yields Stabilize Around Key Support Following Economic Releases',
+        source: 'Investing.com',
+        url: 'https://www.investing.com/news',
         publishedAt: now - 14400000,
         publishedFormatted: '4h ago',
         category: 'YIELDS',
         relevance: 'MEDIUM',
-        marketRelevanceComment: 'Inversely correlated with non-yielding assets; monitor for breakout/breakdown.',
+        marketRelevanceComment: 'Bond yield stability reduces immediate headwinds for precious metals desks.',
       },
       {
-        id: 'curated_4',
-        headline: 'Middle East Geopolitical Tensions Keep Bullion Bid Supported Above Technical Pivots',
-        source: 'Reuters Commodities',
-        url: 'https://www.reuters.com',
+        id: 'curated_6',
+        headline: 'Global Inflation Gauges Flash Mixed Signals Across Major Developed Economies',
+        source: 'Yahoo Finance',
+        url: 'https://finance.yahoo.com',
         publishedAt: now - 21600000,
         publishedFormatted: '6h ago',
-        category: 'GEOPOLITICAL',
+        category: 'INFLATION',
         relevance: 'HIGH',
-        marketRelevanceComment: 'Safe-haven hedge demand limits intraday downside pullbacks in XAUUSD.',
+        marketRelevanceComment: 'Sticky price pressures preserve gold status as an inflation hedge.',
       },
     ];
   }
