@@ -8,6 +8,7 @@
  */
 
 export interface Env {
+  ASSETS?: { fetch: (request: Request) => Promise<Response> };
   DB?: any; // Cloudflare D1 Database binding
   KV?: any; // Cloudflare KV Namespace binding
   FRED_API_KEY?: string;
@@ -19,6 +20,11 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
+
+    // Delegate static assets and client routes to Cloudflare Assets binding
+    if (!path.startsWith('/api') && env.ASSETS) {
+      return env.ASSETS.fetch(request);
+    }
 
     // CORS Headers
     const corsHeaders = {
@@ -168,6 +174,10 @@ export default {
         if (!res.ok) throw new Error(`CFTC error: ${res.status}`);
         const data = await res.json();
         return jsonResponse(data, corsHeaders, 3600); // 1h edge cache
+      }
+
+      if (env.ASSETS) {
+        return env.ASSETS.fetch(request);
       }
 
       return new Response(JSON.stringify({ error: 'Endpoint not found' }), {
