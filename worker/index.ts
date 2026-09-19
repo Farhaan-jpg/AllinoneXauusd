@@ -592,7 +592,7 @@ function parseRssArticles(xml: string, defaultSource: string): any[] {
       const { category, relevance, comment } = classifyArticle(cleanTitle, defaultSource);
 
       items.push({
-        id: `news_${timestamp}_${Math.random().toString(36).slice(2, 7)}`,
+        id: generateArticleId(cleanTitle, link),
         headline: cleanTitle,
         source: defaultSource,
         url: link,
@@ -606,6 +606,17 @@ function parseRssArticles(xml: string, defaultSource: string): any[] {
   }
 
   return items;
+}
+
+function generateArticleId(headline: string, link: string): string {
+  const norm = (headline + ' ' + link).toLowerCase().replace(/[^a-z0-9]/g, '');
+  let hash = 0;
+  for (let i = 0; i < norm.length; i++) {
+    hash = ((hash << 5) - hash) + norm.charCodeAt(i);
+    hash |= 0;
+  }
+  const cleanPrefix = headline.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 24);
+  return `art_${Math.abs(hash)}_${cleanPrefix}`;
 }
 
 function classifyArticle(headline: string, source: string): { category: string; relevance: string; comment: string } {

@@ -24,9 +24,9 @@ class NewsProvider {
           if (ct.includes('json')) {
             const data = await apiRes.json();
             if (Array.isArray(data) && data.length > 0) {
-              articles = data.map((item: any, idx: number) => ({
+              articles = data.map((item: any) => ({
                 ...item,
-                id: item.id || `news_${item.publishedAt || now}_${idx}`,
+                id: item.id || this.generateArticleId(item.headline, item.url || ''),
                 publishedFormatted: this.formatRelativeTime(item.publishedAt || now),
               }));
             }
@@ -77,7 +77,7 @@ class NewsProvider {
           const { category, relevance, comment } = this.classifyArticle(cleanTitle, raw.source);
 
           deduplicated.push({
-            id: `news_${raw.timestamp}_${deduplicated.length}`,
+            id: this.generateArticleId(cleanTitle, raw.link),
             headline: cleanTitle,
             source: raw.source,
             url: raw.link,
@@ -148,6 +148,17 @@ class NewsProvider {
       .replace(/&quot;/g, '"')
       .replace(/&#39;/g, "'")
       .trim();
+  }
+
+  private generateArticleId(headline: string, link: string): string {
+    const norm = (headline + ' ' + link).toLowerCase().replace(/[^a-z0-9]/g, '');
+    let hash = 0;
+    for (let i = 0; i < norm.length; i++) {
+      hash = ((hash << 5) - hash) + norm.charCodeAt(i);
+      hash |= 0;
+    }
+    const cleanPrefix = headline.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 24);
+    return `art_${Math.abs(hash)}_${cleanPrefix}`;
   }
 
   public classifyArticle(headline: string, source: string = 'Financial News'): {

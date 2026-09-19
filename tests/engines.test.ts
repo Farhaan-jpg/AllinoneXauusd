@@ -288,8 +288,8 @@ describe('AlertEngine Initial Warmup & Live Transitions', () => {
         headline: 'Federal Reserve Announces Emergency 50bps Rate Cut Amid Liquidity Strain',
         source: 'Reuters',
         url: 'https://reuters.com/markets',
-        publishedAt: Date.now() - 60000, // 1 minute ago
-        publishedFormatted: '1m ago',
+        publishedAt: Date.now(), // Live breaking news during active session
+        publishedFormatted: 'Just now',
         category: 'FED' as const,
         relevance: 'CRITICAL' as const,
         marketRelevanceComment: 'Aggressive dovish pivot significantly bullish for physical and spot gold.',
@@ -302,6 +302,32 @@ describe('AlertEngine Initial Warmup & Live Transitions', () => {
     expect(alertCount).toBe(2);
     expect(engine.getHistory()[0].type).toBe('NEWS_HIGH_IMPACT');
     expect(engine.getHistory()[0].title).toContain('CRITICAL');
+
+    // FOURTH EVALUATION: Same news received again on subsequent fetch (e.g. 60s later)
+    engine.evaluate(crossedQuote, dummyStructure, dummyZones, dummyLiquidity, dummyOrderFlow, [], breakingNews);
+
+    // Alert count MUST REMAIN 2 (Zero duplicate notification!)
+    expect(alertCount).toBe(2);
+
+    // FIFTH EVALUATION: Same story with different ID from another RSS source
+    const duplicateFromOtherSource = [
+      {
+        id: 'news_diff_id_same_headline',
+        headline: 'Federal Reserve Announces Emergency 50bps Rate Cut Amid Liquidity Strain',
+        source: 'Bloomberg',
+        url: 'https://bloomberg.com/news',
+        publishedAt: Date.now(),
+        publishedFormatted: 'Just now',
+        category: 'FED' as const,
+        relevance: 'CRITICAL' as const,
+        marketRelevanceComment: 'Duplicate headline should be suppressed by headline signature.',
+      },
+    ];
+
+    engine.evaluate(crossedQuote, dummyStructure, dummyZones, dummyLiquidity, dummyOrderFlow, [], duplicateFromOtherSource);
+
+    // Alert count MUST STILL REMAIN 2 (Suppressed by headline signature deduplication!)
+    expect(alertCount).toBe(2);
   });
 
   it('translates abbreviations for natural spoken voice alerts', () => {

@@ -13,6 +13,9 @@ export class AlertEngine {
 
   // Session baseline & transition tracking to prevent alerts on page load
   private isInitialized = false;
+  private newsInitialized = false;
+  private calendarInitialized = false;
+  private sessionStartTime = Date.now();
   private lastPrice: number | null = null;
   private lastBosSignature: string | null = null;
   private lastChochSignature: string | null = null;
@@ -20,10 +23,12 @@ export class AlertEngine {
   private sweptLevelIds: Set<string> = new Set();
   private triggeredNewsIds: Set<string> = new Set();
   private seenNewsArticleIds: Set<string> = new Set();
+  private seenHeadlineSignatures: Set<string> = new Set();
   private seenReleasedEventIds: Set<string> = new Set();
 
   constructor() {
     this.loadPersistedRules();
+    this.loadPersistedDeduplicationState();
   }
 
   public setSoundEnabled(enabled: boolean) {
@@ -96,6 +101,9 @@ export class AlertEngine {
 
   public resetSession() {
     this.isInitialized = false;
+    this.newsInitialized = false;
+    this.calendarInitialized = false;
+    this.sessionStartTime = Date.now();
     this.lastPrice = null;
     this.lastBosSignature = null;
     this.lastChochSignature = null;
@@ -103,8 +111,16 @@ export class AlertEngine {
     this.sweptLevelIds.clear();
     this.triggeredNewsIds.clear();
     this.seenNewsArticleIds.clear();
+    this.seenHeadlineSignatures.clear();
     this.seenReleasedEventIds.clear();
     this.cooldownMap.clear();
+    try {
+      localStorage.removeItem('xauusd_seen_news_ids');
+      localStorage.removeItem('xauusd_seen_headline_sigs');
+      localStorage.removeItem('xauusd_seen_calendar_events');
+    } catch {
+      // ignore
+    }
   }
 
   public addRule(rule: Omit<AlertRule, 'id' | 'createdAt'>): AlertRule {
@@ -162,6 +178,7 @@ export class AlertEngine {
     // so the user is never spammed with historical events on page load.
     if (!this.isInitialized) {
       this.isInitialized = true;
+      this.sessionStartTime = now;
       this.lastPrice = quote.price;
       this.lastBosSignature = structure.bos ? `${structure.bos.type}_${structure.bos.price}` : null;
       this.lastChochSignature = structure.choch ? `${structure.choch.type}_${structure.choch.price}` : null;
@@ -171,16 +188,6 @@ export class AlertEngine {
       this.sweptLevelIds = new Set(
         liquidity.filter(l => l.status === 'SWEPT').map(l => l.id)
       );
-      // Suppress imminent news alerts if they already exist on initial load
-      upcomingEvents
-        .filter(e => e.isHighImpact && e.country === 'USD' && e.timestamp > now && (e.timestamp - now) <= 15 * 60 * 1000)
-        .forEach(e => this.triggeredNewsIds.add(e.id));
-      upcomingEvents
-        .filter(e => e.actual)
-        .forEach(e => this.seenReleasedEventIds.add(e.id));
-      if (newsArticles && newsArticles.length > 0) {
-        newsArticles.forEach(a => this.seenNewsArticleIds.add(a.id));
-      }
       return;
     }
 
@@ -254,53 +261,91 @@ export class AlertEngine {
       }
     }
 
-    // 2. High-Impact Macro News Countdown Alert (Built-in safeguard)
-    const imminentNews = upcomingEvents.find(
-      e => e.isHighImpact && e.country === 'USD' && e.timestamp > now && (e.timestamp - now) <= 15 * 60 * 1000
-    );
+    // 2. High-Impact Macro News Countdown & Release Alerts
+    if (!this.calendarInitialized && upcomingEvents && upcomingEvents.length > 0) {
+      // Warmup calendar events: record existing ones so they do not trigger upon arrival
+      this.calendarInitialized = true;
+      upcomingEvents
+        .filter(e => e.isHighImpact && e.country === 'USD' && e.timestamp > now && (e.timestamp - now) <= 15 * 60 * 1000)
+        .forEach(e => this.triggeredNewsIds.add(e.id));
+      upcomingEvents
+        .filter(e => e.actual)
+        .forEach(e => this.seenReleasedEventIds.add(e.id));
+      this.persistDeduplicationState();
+    } else if (this.calendarInitialized && upcomingEvents && upcomingEvents.length > 0) {
+      // 2a. Countdown Alert (Within 15 minutes of event)
+      const imminentNews = upcomingEvents.find(
+        e => e.isHighImpact && e.country === 'USD' && e.timestamp > now && (e.timestamp - now) <= 15 * 60 * 1000
+      );
 
-    if (imminentNews && !this.triggeredNewsIds.has(imminentNews.id)) {
-      this.triggeredNewsIds.add(imminentNews.id);
-      const shouldSendTg = telegramConfig?.sendNewsAlerts !== false;
-      this.dispatchAlert({
-        id: `evt_news_cd_${imminentNews.id}_${now}`,
-        type: 'NEWS_HIGH_IMPACT',
-        title: `⚠️ Event Risk: ${imminentNews.title}`,
-        message: `${imminentNews.title} releases in ${imminentNews.countdownText}. XAUUSD spread and volatility may surge.`,
-        timestamp: now,
-        level: 'critical',
-        read: false,
-      }, shouldSendTg ? telegramConfig : undefined);
+      if (imminentNews && !this.triggeredNewsIds.has(imminentNews.id)) {
+        this.triggeredNewsIds.add(imminentNews.id);
+        this.persistDeduplicationState();
+        const shouldSendTg = telegramConfig?.sendNewsAlerts !== false;
+        this.dispatchAlert({
+          id: `evt_news_cd_${imminentNews.id}_${now}`,
+          type: 'NEWS_HIGH_IMPACT',
+          title: `⚠️ Event Risk: ${imminentNews.title}`,
+          message: `${imminentNews.title} releases in ${imminentNews.countdownText}. XAUUSD spread and volatility may surge.`,
+          timestamp: now,
+          level: 'critical',
+          read: false,
+        }, shouldSendTg ? telegramConfig : undefined);
+      }
+
+      // 2b. Economic Data Release Alert (When actual number drops)
+      const freshRelease = upcomingEvents.find(
+        e => e.isHighImpact && e.country === 'USD' && e.actual && !this.seenReleasedEventIds.has(e.id) && Math.abs(now - e.timestamp) < 45 * 60 * 1000
+      );
+      if (freshRelease) {
+        this.seenReleasedEventIds.add(freshRelease.id);
+        this.persistDeduplicationState();
+        const shouldSendTg = telegramConfig?.sendNewsAlerts !== false;
+        this.dispatchAlert({
+          id: `evt_news_rel_${freshRelease.id}_${now}`,
+          type: 'NEWS_HIGH_IMPACT',
+          title: `📊 Economic Release: ${freshRelease.title}`,
+          message: `${freshRelease.title} reported: Actual ${freshRelease.actual} (Forecast: ${freshRelease.forecast || 'N/A'}, Previous: ${freshRelease.previous || 'N/A'}).`,
+          timestamp: now,
+          level: 'critical',
+          read: false,
+        }, shouldSendTg ? telegramConfig : undefined);
+      }
     }
 
-    // 3. High-Impact Economic Data Release Alert (When actual number drops)
-    const freshRelease = upcomingEvents.find(
-      e => e.isHighImpact && e.country === 'USD' && e.actual && !this.seenReleasedEventIds.has(e.id) && Math.abs(now - e.timestamp) < 45 * 60 * 1000
-    );
-    if (freshRelease) {
-      this.seenReleasedEventIds.add(freshRelease.id);
-      const shouldSendTg = telegramConfig?.sendNewsAlerts !== false;
-      this.dispatchAlert({
-        id: `evt_news_rel_${freshRelease.id}_${now}`,
-        type: 'NEWS_HIGH_IMPACT',
-        title: `📊 Economic Release: ${freshRelease.title}`,
-        message: `${freshRelease.title} reported: Actual ${freshRelease.actual} (Forecast: ${freshRelease.forecast || 'N/A'}, Previous: ${freshRelease.previous || 'N/A'}).`,
-        timestamp: now,
-        level: 'critical',
-        read: false,
-      }, shouldSendTg ? telegramConfig : undefined);
-    }
-
-    // 4. Real-Time Breaking High-Impact News Articles
+    // 4. Real-Time Breaking High-Impact News Articles (Strict Dual-Key Deduplication)
     if (newsArticles && newsArticles.length > 0) {
+      if (!this.newsInitialized) {
+        // Initial warmup: mark all historical articles published before this session as seen
+        this.newsInitialized = true;
+        for (const article of newsArticles) {
+          if (article.publishedAt < this.sessionStartTime - 30000) {
+            this.seenNewsArticleIds.add(article.id);
+            const sig = article.headline.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 45);
+            this.seenHeadlineSignatures.add(sig);
+          }
+        }
+        this.persistDeduplicationState();
+      }
+
       for (const article of newsArticles) {
-        if (this.seenNewsArticleIds.has(article.id)) continue;
+        const sig = article.headline.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 45);
+
+        // STRICT DEDUPLICATION: Check both article.id AND normalized headline signature
+        if (this.seenNewsArticleIds.has(article.id) || this.seenHeadlineSignatures.has(sig)) {
+          continue;
+        }
+
+        // Mark as seen immediately so it can NEVER trigger again across any fetch or reload
         this.seenNewsArticleIds.add(article.id);
+        this.seenHeadlineSignatures.add(sig);
+        this.persistDeduplicationState();
 
         const isHighImpact = article.relevance === 'CRITICAL' || article.relevance === 'HIGH';
-        const isRecent = now - article.publishedAt < 60 * 60 * 1000;
+        const isRecent = now - article.publishedAt < 45 * 60 * 1000;
+        const isAfterSessionStart = article.publishedAt >= this.sessionStartTime - 60000;
 
-        if (isHighImpact && isRecent) {
+        if (isHighImpact && isRecent && isAfterSessionStart) {
           const shouldSendTg = telegramConfig?.sendNewsAlerts !== false;
           const impactLabel = article.relevance === 'CRITICAL' ? '🚨 CRITICAL' : '⚡ HIGH IMPACT';
           this.dispatchAlert({
@@ -455,6 +500,41 @@ export class AlertEngine {
       localStorage.setItem('xauusd_terminal_alert_rules', JSON.stringify(this.rules));
     } catch {
       // Ignore localStorage error
+    }
+  }
+
+  private loadPersistedDeduplicationState() {
+    try {
+      const savedNewsIds = localStorage.getItem('xauusd_seen_news_ids');
+      if (savedNewsIds) {
+        const arr: string[] = JSON.parse(savedNewsIds);
+        arr.forEach(id => this.seenNewsArticleIds.add(id));
+      }
+      const savedSigs = localStorage.getItem('xauusd_seen_headline_sigs');
+      if (savedSigs) {
+        const arr: string[] = JSON.parse(savedSigs);
+        arr.forEach(sig => this.seenHeadlineSignatures.add(sig));
+      }
+      const savedEvents = localStorage.getItem('xauusd_seen_calendar_events');
+      if (savedEvents) {
+        const arr: string[] = JSON.parse(savedEvents);
+        arr.forEach(id => {
+          this.triggeredNewsIds.add(id);
+          this.seenReleasedEventIds.add(id);
+        });
+      }
+    } catch {
+      // Ignore localStorage errors
+    }
+  }
+
+  private persistDeduplicationState() {
+    try {
+      localStorage.setItem('xauusd_seen_news_ids', JSON.stringify([...this.seenNewsArticleIds].slice(-300)));
+      localStorage.setItem('xauusd_seen_headline_sigs', JSON.stringify([...this.seenHeadlineSignatures].slice(-300)));
+      localStorage.setItem('xauusd_seen_calendar_events', JSON.stringify([...this.seenReleasedEventIds, ...this.triggeredNewsIds].slice(-300)));
+    } catch {
+      // Ignore localStorage errors
     }
   }
 }
