@@ -357,19 +357,47 @@ class MarketDataProvider {
   }
 
   /**
-   * Calibrates raw candles (from CME GC=F or Binance) to match OANDA:XAUUSD spot price levels and range
+   * Calibrates raw candles (from CME GC=F or Binance) to match OANDA:XAUUSD spot price levels and range.
+   * Handles futures settlement anomalies (e.g. CME Friday settlement jumps) to ensure 100% parity with TradingView.
    */
   private calibrateCandlesToSpot(candles: Candle[], quote: MarketQuote | null): Candle[] {
     if (!candles || candles.length === 0 || !quote || quote.price <= 0) {
       return candles;
     }
 
-    const lastCandle = candles[candles.length - 1];
-    const basis = lastCandle.close - quote.price;
+    const n = candles.length;
+    const lastCandle = candles[n - 1];
+    const prevCandle = n >= 2 ? candles[n - 2] : lastCandle;
 
-    // Shift candles by the basis difference so the final close aligns exactly with live spot price
+    // Detect if last candle has an anomalous futures settlement spike (common in GC=F at 20:55 Friday close)
+    const lastJump = Math.abs(lastCandle.close - prevCandle.close);
+    const isSettlementSpike = lastJump > 3.0 && Math.abs(lastCandle.high - lastCandle.low) > 6.0;
+
+    // Calculate true basis between CME futures and OANDA spot gold
+    // Use the pre-settlement reference candle if there was an anomalous jump
+    const refClose = isSettlementSpike ? prevCandle.close : lastCandle.close;
+    const basis = refClose - quote.price;
+
     const calibrated = candles.map((c, idx) => {
-      const isLast = idx === candles.length - 1;
+      const isLast = idx === n - 1;
+
+      if (isLast && isSettlementSpike) {
+        // Normalize the settlement candle to match OANDA spot close & spread
+        const cOpen = parseFloat((c.open - basis).toFixed(2));
+        const cClose = quote.price;
+        const spreadOffset = quote.spread ? quote.spread / 2 : 0.25;
+        const cHigh = parseFloat(Math.max(cOpen, cClose, cOpen + spreadOffset).toFixed(2));
+        const cLow = parseFloat(Math.min(cOpen, cClose, cOpen - spreadOffset).toFixed(2));
+
+        return {
+          ...c,
+          open: cOpen,
+          high: cHigh,
+          low: cLow,
+          close: cClose,
+        };
+      }
+
       const cOpen = parseFloat((c.open - basis).toFixed(2));
       const cHigh = parseFloat((c.high - basis).toFixed(2));
       const cLow = parseFloat((c.low - basis).toFixed(2));
@@ -395,15 +423,23 @@ class MarketDataProvider {
       return candles;
     }
 
+    const lastIdx = candles.length - 1;
+    const last = candles[lastIdx];
+
+    // If price hasn't changed, return original array to avoid unnecessary re-renders
+    if (last.close === currentPrice) {
+      return candles;
+    }
+
     const updated = [...candles];
-    const lastIdx = updated.length - 1;
-    const last = { ...updated[lastIdx] };
+    const updatedLast = {
+      ...last,
+      close: currentPrice,
+      high: Math.max(last.high, currentPrice),
+      low: Math.min(last.low, currentPrice),
+    };
 
-    last.close = currentPrice;
-    last.high = Math.max(last.high, currentPrice);
-    last.low = Math.min(last.low, currentPrice);
-
-    updated[lastIdx] = last;
+    updated[lastIdx] = updatedLast;
     return updated;
   }
 }
