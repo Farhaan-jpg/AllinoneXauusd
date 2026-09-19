@@ -4,10 +4,10 @@ import { providerStatusManager } from './providerStatusManager';
 class MarketDataProvider {
   private lastQuote: MarketQuote | null = null;
   private quoteCacheTime = 0;
-  private readonly QUOTE_TTL_MS = 2500; // 2.5s cache to prevent hammering
+  private readonly QUOTE_TTL_MS = 500; // 500ms cache to allow 1-second live polling without duplicate calls
 
   private candleCache: Map<string, { candles: Candle[]; timestamp: number }> = new Map();
-  private readonly CANDLE_TTL_MS = 8000; // 8s cache
+  private readonly CANDLE_TTL_MS = 5000; // 5s cache
 
   public async getQuote(): Promise<MarketQuote> {
     const now = Date.now();
@@ -16,107 +16,180 @@ class MarketDataProvider {
     }
 
     const startTime = performance.now();
+
+    // 1. Primary: TradingView Official CFD Scanner for OANDA:XAUUSD
     try {
-      // Primary: Binance PAXG/USDT (1:1 physical gold backed proxy)
+      const tvRes = await fetch('https://scanner.tradingview.com/cfd/scan', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        },
+        body: JSON.stringify({
+          symbols: { tickers: ['OANDA:XAUUSD'] },
+          columns: ['close', 'open', 'high', 'low', 'change', 'change_abs', 'bid', 'ask', 'volume'],
+        }),
+      });
+
+      if (tvRes.ok) {
+        const tvData = await tvRes.json();
+        const d = tvData.data?.[0]?.d;
+        if (Array.isArray(d) && d[0] > 0) {
+          const price = parseFloat(d[0]);
+          const open24h = parseFloat(d[1]) || price;
+          const high24h = parseFloat(d[2]) || price;
+          const low24h = parseFloat(d[3]) || price;
+          const changePercent24h = parseFloat(d[4]) || 0;
+          const change24h = parseFloat(d[5]) || 0;
+          const bid = parseFloat(d[6]) || (price - 0.25);
+          const ask = parseFloat(d[7]) || (price + 0.25);
+          const spread = parseFloat((ask - bid).toFixed(2));
+          const volume = parseFloat(d[8]) || 0;
+          const prevClose = parseFloat((price - change24h).toFixed(2));
+
+          const quote: MarketQuote = {
+            symbol: 'OANDA:XAUUSD',
+            price,
+            bid,
+            ask,
+            spread,
+            timestamp: Date.now(),
+            source: 'TradingView OANDA:XAUUSD Live Feed',
+            isDelayed: false,
+            status: 'LIVE',
+            change24h: parseFloat(change24h.toFixed(2)),
+            changePercent24h: parseFloat(changePercent24h.toFixed(2)),
+            high24h,
+            low24h,
+            open24h,
+            prevClose,
+            sessionHigh: high24h,
+            sessionLow: low24h,
+            volume24h: volume,
+          };
+
+          this.lastQuote = quote;
+          this.quoteCacheTime = now;
+
+          const latency = Math.round(performance.now() - startTime);
+          providerStatusManager.updateLatency('xauusd_feed', latency, 'healthy');
+
+          return quote;
+        }
+      }
+    } catch {
+      // Continue to fallback 1
+    }
+
+    // 2. Fallback 1: Worker Endpoint /api/quote/xauusd
+    try {
+      const wRes = await fetch('/api/quote/xauusd');
+      if (wRes.ok) {
+        const wQuote = await wRes.json();
+        if (wQuote && wQuote.price > 0) {
+          this.lastQuote = wQuote;
+          this.quoteCacheTime = now;
+          providerStatusManager.updateLatency('xauusd_feed', Math.round(performance.now() - startTime), 'healthy', 'Worker OANDA:XAUUSD Feed');
+          return wQuote;
+        }
+      }
+    } catch {
+      // Continue to fallback 2
+    }
+
+    // 3. Fallback 2: Gold-API live spot
+    try {
+      const gRes = await fetch('https://api.gold-api.com/price/XAU');
+      if (gRes.ok) {
+        const gData = await gRes.json();
+        if (gData.price > 0) {
+          const price = parseFloat(gData.price);
+          const fallbackQuote: MarketQuote = {
+            symbol: 'OANDA:XAUUSD (Gold-API Spot)',
+            price,
+            bid: price - 0.25,
+            ask: price + 0.25,
+            spread: 0.5,
+            timestamp: Date.now(),
+            source: 'Gold-API Spot XAU/USD',
+            isDelayed: false,
+            status: 'LIVE',
+            change24h: 0,
+            changePercent24h: 0,
+            high24h: price,
+            low24h: price,
+            open24h: price,
+            prevClose: price,
+            sessionHigh: price,
+            sessionLow: price,
+            volume24h: 0,
+          };
+          this.lastQuote = fallbackQuote;
+          this.quoteCacheTime = now;
+          providerStatusManager.updateLatency('xauusd_feed', Math.round(performance.now() - startTime), 'healthy', 'Gold-API Spot Feed');
+          return fallbackQuote;
+        }
+      }
+    } catch {
+      // Continue to fallback 3
+    }
+
+    // 4. Fallback 3: Binance PAXG / USDT
+    try {
       const [tickerRes, bookRes] = await Promise.all([
         fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=PAXGUSDT'),
         fetch('https://api.binance.com/api/v3/ticker/bookTicker?symbol=PAXGUSDT'),
       ]);
 
-      if (!tickerRes.ok || !bookRes.ok) {
-        throw new Error(`HTTP Error ticker=${tickerRes.status} book=${bookRes.status}`);
-      }
+      if (tickerRes.ok && bookRes.ok) {
+        const ticker = await tickerRes.json();
+        const book = await bookRes.json();
+        const price = parseFloat(ticker.lastPrice);
+        const bid = parseFloat(book.bidPrice);
+        const ask = parseFloat(book.askPrice);
+        const spread = parseFloat((ask - bid).toFixed(2));
+        const high24h = parseFloat(ticker.highPrice);
+        const low24h = parseFloat(ticker.lowPrice);
+        const open24h = parseFloat(ticker.openPrice);
+        const prevClose = parseFloat(ticker.prevClosePrice);
+        const change24h = parseFloat(ticker.priceChange);
+        const changePercent24h = parseFloat(ticker.priceChangePercent);
 
-      const ticker = await tickerRes.json();
-      const book = await bookRes.json();
-
-      const price = parseFloat(ticker.lastPrice);
-      const bid = parseFloat(book.bidPrice);
-      const ask = parseFloat(book.askPrice);
-      const spread = parseFloat((ask - bid).toFixed(2));
-      const high24h = parseFloat(ticker.highPrice);
-      const low24h = parseFloat(ticker.lowPrice);
-      const open24h = parseFloat(ticker.openPrice);
-      const prevClose = parseFloat(ticker.prevClosePrice);
-      const change24h = parseFloat(ticker.priceChange);
-      const changePercent24h = parseFloat(ticker.priceChangePercent);
-
-      const quote: MarketQuote = {
-        symbol: 'OANDA:XAUUSD (Proxy: PAXG)',
-        price,
-        bid,
-        ask,
-        spread,
-        timestamp: Date.now(),
-        source: 'Binance PAXG/USD Spot Proxy',
-        isDelayed: false,
-        status: 'LIVE',
-        change24h,
-        changePercent24h,
-        high24h,
-        low24h,
-        open24h,
-        prevClose,
-        sessionHigh: high24h,
-        sessionLow: low24h,
-        volume24h: parseFloat(ticker.volume),
-      };
-
-      this.lastQuote = quote;
-      this.quoteCacheTime = now;
-
-      const latency = Math.round(performance.now() - startTime);
-      providerStatusManager.updateLatency('xauusd_feed', latency, 'healthy');
-
-      return quote;
-    } catch (err) {
-      // Fallback: Yahoo Finance GC=F (CME/COMEX Gold Futures)
-      console.warn('Primary Gold feed failed, attempting fallback to Yahoo GC=F:', err);
-      try {
-        const yRes = await fetch(`/api/yahoo/v8/finance/chart/GC=F?interval=5m&range=1d`).catch(() => fetch(`https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=5m&range=1d`));
-        const yData = await yRes.json();
-        const meta = yData.chart?.result?.[0]?.meta;
-        if (!meta || !meta.regularMarketPrice) {
-          throw new Error('Invalid Yahoo response');
-        }
-
-        const price = meta.regularMarketPrice;
-        const prevClose = meta.previousClose || meta.chartPreviousClose || price;
-        const change24h = price - prevClose;
-        const changePercent24h = prevClose ? (change24h / prevClose) * 100 : 0;
-
-        const fallbackQuote: MarketQuote = {
-          symbol: 'XAUUSD (COMEX GC=F Futures Proxy)',
+        const quote: MarketQuote = {
+          symbol: 'OANDA:XAUUSD (Proxy: PAXG)',
           price,
-          bid: price - 0.2,
-          ask: price + 0.2,
-          spread: 0.4,
+          bid,
+          ask,
+          spread,
           timestamp: Date.now(),
-          source: 'CME/COMEX Gold Futures (GC=F)',
-          isDelayed: true,
-          status: 'DELAYED',
-          change24h: parseFloat(change24h.toFixed(2)),
-          changePercent24h: parseFloat(changePercent24h.toFixed(2)),
-          high24h: meta.regularMarketDayHigh || price,
-          low24h: meta.regularMarketDayLow || price,
-          open24h: meta.regularMarketOpen || prevClose,
+          source: 'Binance PAXG/USDT Proxy',
+          isDelayed: false,
+          status: 'LIVE',
+          change24h,
+          changePercent24h,
+          high24h,
+          low24h,
+          open24h,
           prevClose,
-          sessionHigh: meta.regularMarketDayHigh || price,
-          sessionLow: meta.regularMarketDayLow || price,
+          sessionHigh: high24h,
+          sessionLow: low24h,
+          volume24h: parseFloat(ticker.volume),
         };
 
-        this.lastQuote = fallbackQuote;
+        this.lastQuote = quote;
         this.quoteCacheTime = now;
-        providerStatusManager.updateLatency('xauusd_feed', Math.round(performance.now() - startTime), 'degraded', 'Using CME GC=F Fallback');
-        return fallbackQuote;
-      } catch (fallbackErr) {
-        providerStatusManager.markError('xauusd_feed', String(fallbackErr));
-        if (this.lastQuote) {
-          return { ...this.lastQuote, status: 'STALE' };
-        }
-        throw fallbackErr;
+        providerStatusManager.updateLatency('xauusd_feed', Math.round(performance.now() - startTime), 'degraded', 'Using Binance PAXG Proxy');
+        return quote;
       }
+    } catch (binanceErr) {
+      providerStatusManager.markError('xauusd_feed', String(binanceErr));
+      if (this.lastQuote) {
+        return { ...this.lastQuote, status: 'STALE' };
+      }
+      throw binanceErr;
     }
+
+    throw new Error('All Gold price providers failed');
   }
 
   public async getCandles(timeframe: Timeframe = '5m', limit: number = 200): Promise<Candle[]> {
@@ -128,6 +201,16 @@ class MarketDataProvider {
       return cached.candles;
     }
 
+    // Ensure we have a current quote for price alignment
+    let currentQuote = this.lastQuote;
+    if (!currentQuote || now - this.quoteCacheTime > 5000) {
+      try {
+        currentQuote = await this.getQuote();
+      } catch {
+        // ignore
+      }
+    }
+
     const intervalMap: Record<Timeframe, string> = {
       '1m': '1m',
       '5m': '5m',
@@ -136,7 +219,6 @@ class MarketDataProvider {
       '4H': '4h',
       '1D': '1d',
     };
-
     const interval = intervalMap[timeframe] || '5m';
 
     try {
@@ -146,7 +228,7 @@ class MarketDataProvider {
       const data = await res.json();
       if (!Array.isArray(data)) throw new Error('Invalid klines response format');
 
-      const candles: Candle[] = data.map((item: (string | number)[]) => {
+      const rawCandles: Candle[] = data.map((item: (string | number)[]) => {
         const time = Math.floor(Number(item[0]) / 1000);
         const open = parseFloat(String(item[1]));
         const high = parseFloat(String(item[2]));
@@ -168,11 +250,13 @@ class MarketDataProvider {
         };
       });
 
-      this.candleCache.set(cacheKey, { candles, timestamp: now });
-      return candles;
+      // Calibrate candle prices so the series aligns 1:1 with OANDA:XAUUSD
+      const calibratedCandles = this.calibrateCandlesToSpot(rawCandles, currentQuote);
+
+      this.candleCache.set(cacheKey, { candles: calibratedCandles, timestamp: now });
+      return calibratedCandles;
     } catch (err) {
       console.warn('Binance klines failed, attempting Yahoo Finance fallback:', err);
-      // Fallback: Yahoo Finance
       try {
         const yIntervalMap: Record<Timeframe, { interval: string; range: string }> = {
           '1m': { interval: '1m', range: '1d' },
@@ -192,7 +276,7 @@ class MarketDataProvider {
         const timestamps = result.timestamp;
         const quotes = result.indicators?.quote?.[0];
 
-        const candles: Candle[] = [];
+        const rawCandles: Candle[] = [];
         for (let i = 0; i < timestamps.length; i++) {
           const o = quotes.open?.[i];
           const h = quotes.high?.[i];
@@ -200,7 +284,7 @@ class MarketDataProvider {
           const c = quotes.close?.[i];
           const v = quotes.volume?.[i] || 0;
           if (o !== null && h !== null && l !== null && c !== null && !isNaN(o) && !isNaN(c)) {
-            candles.push({
+            rawCandles.push({
               time: timestamps[i],
               open: parseFloat(o.toFixed(2)),
               high: parseFloat(h.toFixed(2)),
@@ -213,14 +297,66 @@ class MarketDataProvider {
           }
         }
 
-        const sliced = candles.slice(-limit);
-        this.candleCache.set(cacheKey, { candles: sliced, timestamp: now });
-        return sliced;
+        const sliced = rawCandles.slice(-limit);
+        const calibrated = this.calibrateCandlesToSpot(sliced, currentQuote);
+        this.candleCache.set(cacheKey, { candles: calibrated, timestamp: now });
+        return calibrated;
       } catch (fallbackErr) {
         if (cached) return cached.candles;
         throw fallbackErr;
       }
     }
+  }
+
+  /**
+   * Calibrates raw candles (from Binance PAXG or CME GC=F) to match OANDA:XAUUSD spot price levels
+   */
+  private calibrateCandlesToSpot(candles: Candle[], quote: MarketQuote | null): Candle[] {
+    if (!candles || candles.length === 0 || !quote || quote.price <= 0) {
+      return candles;
+    }
+
+    const lastCandle = candles[candles.length - 1];
+    const offset = quote.price - lastCandle.close;
+
+    // Apply offset so the current candle matches the exact OANDA:XAUUSD price
+    const calibrated = candles.map((c, idx) => {
+      const isLast = idx === candles.length - 1;
+      const cOpen = parseFloat((c.open + offset).toFixed(2));
+      const cHigh = parseFloat((c.high + offset).toFixed(2));
+      const cLow = parseFloat((c.low + offset).toFixed(2));
+      const cClose = isLast ? quote.price : parseFloat((c.close + offset).toFixed(2));
+
+      return {
+        ...c,
+        open: cOpen,
+        high: Math.max(cHigh, cOpen, cClose),
+        low: Math.min(cLow, cOpen, cClose),
+        close: cClose,
+      };
+    });
+
+    return calibrated;
+  }
+
+  /**
+   * Dynamically updates the latest candle in real-time when a new 1-second price tick arrives
+   */
+  public updateLastCandle(candles: Candle[], currentPrice: number): Candle[] {
+    if (!candles || candles.length === 0 || !currentPrice || currentPrice <= 0) {
+      return candles;
+    }
+
+    const updated = [...candles];
+    const lastIdx = updated.length - 1;
+    const last = { ...updated[lastIdx] };
+
+    last.close = currentPrice;
+    last.high = Math.max(last.high, currentPrice);
+    last.low = Math.min(last.low, currentPrice);
+
+    updated[lastIdx] = last;
+    return updated;
   }
 }
 

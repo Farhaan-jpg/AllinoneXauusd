@@ -169,11 +169,15 @@ export const App: React.FC = () => {
 
   // --- DATA FETCHING LOOPS ---
 
-  // 1. High-frequency Quote Loop (every 3s)
+  // 1. High-frequency Quote Loop (every 1s real-time)
   const fetchQuote = useCallback(async () => {
     try {
       const q = await marketDataProvider.getQuote();
       setQuote(q);
+      // Immediately update last candle with new 1-second tick price
+      if (q && q.price > 0) {
+        setCandles(prev => marketDataProvider.updateLastCandle(prev, q.price));
+      }
     } catch (e) {
       console.warn('Quote fetch error:', e);
     }
@@ -181,7 +185,7 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     fetchQuote();
-    const timer = setInterval(fetchQuote, 3000);
+    const timer = setInterval(fetchQuote, 1000);
     return () => clearInterval(timer);
   }, [fetchQuote]);
 
@@ -373,6 +377,7 @@ export const App: React.FC = () => {
               profile={volumeProfile}
               zones={zones}
               structure={structure}
+              quote={quote}
             />
           </div>
         </div>

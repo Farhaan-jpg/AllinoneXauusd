@@ -1,6 +1,18 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ExternalLink, Layers, Maximize2, ShieldCheck } from 'lucide-react';
-import { Candle, LiquidityLevel, MarketStructureState, Timeframe, TradingZone, VolumeProfile } from '../types/market';
+import { ExternalLink, Layers, ShieldCheck, Zap } from 'lucide-react';
+import {
+  CandlestickSeries,
+  ColorType,
+  createChart,
+  createSeriesMarkers,
+  CrosshairMode,
+  IChartApi,
+  IPriceLine,
+  ISeriesApi,
+  LineStyle,
+  UTCTimestamp,
+} from 'lightweight-charts';
+import { Candle, LiquidityLevel, MarketQuote, MarketStructureState, Timeframe, TradingZone, VolumeProfile } from '../types/market';
 
 interface ChartSectionProps {
   timeframe: Timeframe;
@@ -9,6 +21,7 @@ interface ChartSectionProps {
   profile: VolumeProfile | null;
   zones: TradingZone[];
   structure: MarketStructureState;
+  quote?: MarketQuote | null;
 }
 
 export const ChartSection: React.FC<ChartSectionProps> = ({
@@ -18,6 +31,7 @@ export const ChartSection: React.FC<ChartSectionProps> = ({
   profile,
   zones,
   structure,
+  quote,
 }) => {
   const [chartMode, setChartMode] = useState<'TRADINGVIEW' | 'TERMINAL_ANALYTICS'>('TRADINGVIEW');
   const [showLiquidity, setShowLiquidity] = useState(true);
@@ -25,7 +39,10 @@ export const ChartSection: React.FC<ChartSectionProps> = ({
   const [showZones, setShowZones] = useState(true);
   const [showStructure, setShowStructure] = useState(true);
 
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const chartContainerRef = useRef<HTMLDivElement | null>(null);
+  const chartRef = useRef<IChartApi | null>(null);
+  const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
+  const priceLinesRef = useRef<IPriceLine[]>([]);
 
   // Map timeframe to TradingView interval format
   const tvIntervalMap: Record<Timeframe, string> = {
@@ -38,179 +55,236 @@ export const ChartSection: React.FC<ChartSectionProps> = ({
   };
   const tvInterval = tvIntervalMap[timeframe] || '5';
 
-  // Render Terminal Analytics Chart on HTML5 Canvas
+  // Initialize and update Lightweight Charts in TERMINAL_ANALYTICS mode
   useEffect(() => {
-    if (chartMode !== 'TERMINAL_ANALYTICS') return;
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const width = (canvas.width = canvas.parentElement?.clientWidth || 800);
-    const height = (canvas.height = 420);
-
-    // Background
-    ctx.fillStyle = '#0a0d14';
-    ctx.fillRect(0, 0, width, height);
-
-    if (candles.length < 5) {
-      ctx.fillStyle = '#64748b';
-      ctx.font = '14px monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText('Loading candles...', width / 2, height / 2);
+    if (chartMode !== 'TERMINAL_ANALYTICS') {
+      if (chartRef.current) {
+        chartRef.current.remove();
+        chartRef.current = null;
+        seriesRef.current = null;
+        priceLinesRef.current = [];
+      }
       return;
     }
 
-    const visibleCandles = candles.slice(-60);
-    const high = Math.max(...visibleCandles.map(c => c.high));
-    const low = Math.min(...visibleCandles.map(c => c.low));
-    const range = high - low || 1;
+    const container = chartContainerRef.current;
+    if (!container) return;
 
-    const priceToY = (price: number) => {
-      const pad = 24;
-      return pad + (height - 2 * pad) * (1 - (price - low) / range);
-    };
-
-    // Draw grid lines
-    ctx.strokeStyle = '#181e2b';
-    ctx.lineWidth = 1;
-    for (let p = Math.ceil(low); p <= Math.floor(high); p += Math.max(1, Math.round(range / 5))) {
-      const y = priceToY(p);
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(width - 55, y);
-      ctx.stroke();
-
-      ctx.fillStyle = '#475569';
-      ctx.font = '10px monospace';
-      ctx.textAlign = 'left';
-      ctx.fillText(`$${p.toFixed(2)}`, width - 50, y + 3);
-    }
-
-    // Draw Reaction Zones
-    if (showZones && zones) {
-      zones.slice(0, 4).forEach(z => {
-        const topY = priceToY(z.priceMax);
-        const botY = priceToY(z.priceMin);
-        const zHeight = Math.max(2, botY - topY);
-
-        ctx.fillStyle = z.type === 'Pullback Zone' ? 'rgba(59, 130, 246, 0.15)' : 'rgba(239, 68, 68, 0.15)';
-        ctx.fillRect(0, topY, width - 55, zHeight);
-
-        ctx.strokeStyle = z.type === 'Pullback Zone' ? 'rgba(59, 130, 246, 0.5)' : 'rgba(239, 68, 68, 0.5)';
-        ctx.setLineDash([4, 4]);
-        ctx.strokeRect(0, topY, width - 55, zHeight);
-        ctx.setLineDash([]);
-
-        ctx.fillStyle = z.type === 'Pullback Zone' ? '#60a5fa' : '#f87171';
-        ctx.font = '10px monospace';
-        ctx.textAlign = 'right';
-        ctx.fillText(`${z.type} ($${z.priceMin.toFixed(1)}-$${z.priceMax.toFixed(1)})`, width - 60, topY + 12);
+    // Create chart instance if not already created
+    if (!chartRef.current) {
+      const chart = createChart(container, {
+        width: container.clientWidth || 800,
+        height: 480,
+        layout: {
+          background: { type: ColorType.Solid, color: '#0a0d14' },
+          textColor: '#94a3b8',
+          fontFamily: 'monospace',
+          fontSize: 11,
+        },
+        grid: {
+          vertLines: { color: '#141923' },
+          horzLines: { color: '#141923' },
+        },
+        crosshair: {
+          mode: CrosshairMode.Normal,
+          vertLine: {
+            color: '#3b82f6',
+            width: 1,
+            style: LineStyle.Dashed,
+            labelBackgroundColor: '#1e293b',
+          },
+          horzLine: {
+            color: '#3b82f6',
+            width: 1,
+            style: LineStyle.Dashed,
+            labelBackgroundColor: '#1e293b',
+          },
+        },
+        rightPriceScale: {
+          borderColor: '#232b3c',
+          scaleMargins: {
+            top: 0.12,
+            bottom: 0.12,
+          },
+        },
+        timeScale: {
+          borderColor: '#232b3c',
+          timeVisible: true,
+          secondsVisible: false,
+        },
       });
-    }
 
-    // Draw Volume Profile lines (POC, VAH, VAL)
-    if (showProfile && profile && profile.poc > 0) {
-      // POC Line
-      const pocY = priceToY(profile.poc);
-      ctx.strokeStyle = '#d97706';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(0, pocY);
-      ctx.lineTo(width - 55, pocY);
-      ctx.stroke();
+      const series = chart.addSeries(CandlestickSeries, {
+        upColor: '#10b981',
+        downColor: '#ef4444',
+        borderVisible: false,
+        wickUpColor: '#10b981',
+        wickDownColor: '#ef4444',
+      });
 
-      ctx.fillStyle = '#fbbf24';
-      ctx.font = 'bold 10px monospace';
-      ctx.textAlign = 'left';
-      ctx.fillText(`POC: $${profile.poc.toFixed(2)}`, 8, pocY - 4);
+      chartRef.current = chart;
+      seriesRef.current = series;
 
-      // VAH / VAL Lines
-      ctx.strokeStyle = 'rgba(217, 119, 6, 0.5)';
-      ctx.lineWidth = 1;
-      ctx.setLineDash([2, 2]);
-
-      const vahY = priceToY(profile.vah);
-      ctx.beginPath();
-      ctx.moveTo(0, vahY);
-      ctx.lineTo(width - 55, vahY);
-      ctx.stroke();
-      ctx.fillText(`VAH: $${profile.vah.toFixed(2)}`, 8, vahY - 4);
-
-      const valY = priceToY(profile.val);
-      ctx.beginPath();
-      ctx.moveTo(0, valY);
-      ctx.lineTo(width - 55, valY);
-      ctx.stroke();
-      ctx.fillText(`VAL: $${profile.val.toFixed(2)}`, 8, valY + 12);
-      ctx.setLineDash([]);
-    }
-
-    // Draw Derived Liquidity Levels
-    if (showLiquidity && liquidityLevels) {
-      liquidityLevels.slice(0, 4).forEach(l => {
-        if (l.price >= low && l.price <= high) {
-          const y = priceToY(l.price);
-          ctx.strokeStyle = l.type === 'HIGH' ? '#059669' : '#dc2626';
-          ctx.lineWidth = 1;
-          ctx.setLineDash([3, 3]);
-          ctx.beginPath();
-          ctx.moveTo(0, y);
-          ctx.lineTo(width - 55, y);
-          ctx.stroke();
-          ctx.setLineDash([]);
-
-          ctx.fillStyle = l.type === 'HIGH' ? '#34d399' : '#f87171';
-          ctx.font = '10px monospace';
-          ctx.textAlign = 'left';
-          ctx.fillText(`${l.label} (${l.status})`, width * 0.45, y - 3);
+      // Responsive resize
+      const handleResize = () => {
+        if (container && chart) {
+          chart.applyOptions({ width: container.clientWidth });
         }
+      };
+
+      const resizeObserver = new ResizeObserver(handleResize);
+      resizeObserver.observe(container);
+
+      return () => {
+        resizeObserver.disconnect();
+        chart.remove();
+        chartRef.current = null;
+        seriesRef.current = null;
+        priceLinesRef.current = [];
+      };
+    }
+  }, [chartMode]);
+
+  // Update Candlestick Data and Overlays
+  useEffect(() => {
+    if (chartMode !== 'TERMINAL_ANALYTICS' || !seriesRef.current || candles.length === 0) return;
+
+    const series = seriesRef.current;
+
+    // Deduplicate and sort candles by timestamp
+    const sorted = [...candles]
+      .sort((a, b) => a.time - b.time)
+      .filter((c, idx, arr) => idx === 0 || c.time > arr[idx - 1].time);
+
+    const chartData = sorted.map(c => ({
+      time: c.time as UTCTimestamp,
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+    }));
+
+    series.setData(chartData);
+
+    // Clear previous price lines
+    priceLinesRef.current.forEach(line => {
+      try {
+        series.removePriceLine(line);
+      } catch {
+        // ignore
+      }
+    });
+    priceLinesRef.current = [];
+
+    // 1. Overlay: Volume Profile (POC, VAH, VAL)
+    if (showProfile && profile && profile.poc > 0) {
+      const pocLine = series.createPriceLine({
+        price: profile.poc,
+        color: '#fbbf24',
+        lineWidth: 2,
+        lineStyle: LineStyle.Solid,
+        axisLabelVisible: true,
+        title: `POC: $${profile.poc.toFixed(2)}`,
+      });
+      priceLinesRef.current.push(pocLine);
+
+      if (profile.vah > 0) {
+        const vahLine = series.createPriceLine({
+          price: profile.vah,
+          color: '#d97706',
+          lineWidth: 1,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: `VAH: $${profile.vah.toFixed(2)}`,
+        });
+        priceLinesRef.current.push(vahLine);
+      }
+
+      if (profile.val > 0) {
+        const valLine = series.createPriceLine({
+          price: profile.val,
+          color: '#d97706',
+          lineWidth: 1,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: `VAL: $${profile.val.toFixed(2)}`,
+        });
+        priceLinesRef.current.push(valLine);
+      }
+    }
+
+    // 2. Overlay: Liquidity Levels
+    if (showLiquidity && liquidityLevels) {
+      liquidityLevels.slice(0, 5).forEach(lvl => {
+        const isHigh = lvl.type === 'HIGH';
+        const line = series.createPriceLine({
+          price: lvl.price,
+          color: isHigh ? '#34d399' : '#f87171',
+          lineWidth: 1,
+          lineStyle: LineStyle.Dotted,
+          axisLabelVisible: true,
+          title: `${lvl.label} (${lvl.status})`,
+        });
+        priceLinesRef.current.push(line);
       });
     }
 
-    // Draw Candlesticks
-    const chartW = width - 60;
-    const candleW = Math.max(3, chartW / visibleCandles.length - 2);
+    // 3. Overlay: Reaction Zones
+    if (showZones && zones) {
+      zones.slice(0, 3).forEach(z => {
+        const isPullback = z.type === 'Pullback Zone';
+        const color = isPullback ? '#3b82f6' : '#ef4444';
+        const lineTop = series.createPriceLine({
+          price: z.priceMax,
+          color,
+          lineWidth: 1,
+          lineStyle: LineStyle.LargeDashed,
+          axisLabelVisible: false,
+          title: `${z.type} Top`,
+        });
+        const lineBot = series.createPriceLine({
+          price: z.priceMin,
+          color,
+          lineWidth: 1,
+          lineStyle: LineStyle.LargeDashed,
+          axisLabelVisible: true,
+          title: `${z.type} ($${z.priceMin.toFixed(1)}-$${z.priceMax.toFixed(1)})`,
+        });
+        priceLinesRef.current.push(lineTop, lineBot);
+      });
+    }
 
-    visibleCandles.forEach((c, idx) => {
-      const x = 10 + idx * (chartW / visibleCandles.length);
-      const isUp = c.close >= c.open;
-      const bodyTop = priceToY(Math.max(c.open, c.close));
-      const bodyBot = priceToY(Math.min(c.open, c.close));
-      const wickTop = priceToY(c.high);
-      const wickBot = priceToY(c.low);
+    // 4. Overlay: Market Structure Markers (BOS / CHOCH)
+    if (showStructure && sorted.length > 0) {
+      const markers: any[] = [];
+      const latestTime = sorted[sorted.length - 1].time as UTCTimestamp;
 
-      const color = isUp ? '#10b981' : '#ef4444';
-
-      // Wick
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1.2;
-      ctx.beginPath();
-      ctx.moveTo(x + candleW / 2, wickTop);
-      ctx.lineTo(x + candleW / 2, wickBot);
-      ctx.stroke();
-
-      // Body
-      ctx.fillStyle = color;
-      ctx.fillRect(x, bodyTop, candleW, Math.max(1.5, bodyBot - bodyTop));
-    });
-
-    // Structure Markers (BOS / CHOCH / Sweep)
-    if (showStructure) {
       if (structure.bos) {
-        const y = priceToY(structure.bos.price);
-        ctx.fillStyle = '#38bdf8';
-        ctx.font = 'bold 11px monospace';
-        ctx.textAlign = 'right';
-        ctx.fillText(`⚡ ${structure.bos.type}`, width - 70, y - 6);
+        const isBull = structure.bos.type.includes('Bullish');
+        markers.push({
+          time: latestTime,
+          position: isBull ? 'belowBar' : 'aboveBar',
+          color: '#38bdf8',
+          shape: isBull ? 'arrowUp' : 'arrowDown',
+          text: `⚡ ${structure.bos.type}`,
+        });
       }
+
       if (structure.choch) {
-        const y = priceToY(structure.choch.price);
-        ctx.fillStyle = '#c084fc';
-        ctx.font = 'bold 11px monospace';
-        ctx.textAlign = 'right';
-        ctx.fillText(`🔄 ${structure.choch.type}`, width - 70, y - 6);
+        const isBull = structure.choch.type.includes('Bullish');
+        markers.push({
+          time: latestTime,
+          position: isBull ? 'belowBar' : 'aboveBar',
+          color: '#c084fc',
+          shape: 'circle',
+          text: `🔄 ${structure.choch.type}`,
+        });
+      }
+
+      try {
+        createSeriesMarkers(series, markers);
+      } catch {
+        // ignore marker errors if timestamps align differently
       }
     }
   }, [chartMode, candles, liquidityLevels, profile, zones, structure, showLiquidity, showProfile, showZones, showStructure]);
@@ -224,8 +298,13 @@ export const ChartSection: React.FC<ChartSectionProps> = ({
             XAUUSD {timeframe.toUpperCase()} CHART
           </span>
           <span className="text-[10px] text-zinc-500 font-mono">
-            {chartMode === 'TRADINGVIEW' ? 'OANDA:XAUUSD Feed' : 'Terminal Overlay Canvas'}
+            {chartMode === 'TRADINGVIEW' ? 'TradingView OANDA:XAUUSD Feed' : 'Overlay Engine (Lightweight Charts)'}
           </span>
+          {quote && (
+            <span className="text-[11px] font-mono font-bold text-amber-400 bg-[#151a24] px-1.5 py-0.5 rounded border border-[#232b3c]">
+              ${quote.price.toFixed(2)}
+            </span>
+          )}
         </div>
 
         {/* Mode Selector & Quick Links */}
@@ -234,7 +313,7 @@ export const ChartSection: React.FC<ChartSectionProps> = ({
           <div className="bg-[#151a24] p-0.5 rounded border border-[#232b3c] flex items-center">
             <button
               onClick={() => setChartMode('TRADINGVIEW')}
-              className={`px-2 py-0.5 rounded text-[11px] font-mono font-semibold transition-colors ${
+              className={`px-2.5 py-0.5 rounded text-[11px] font-mono font-semibold transition-colors ${
                 chartMode === 'TRADINGVIEW'
                   ? 'bg-blue-600 text-white'
                   : 'text-zinc-400 hover:text-zinc-200'
@@ -244,12 +323,13 @@ export const ChartSection: React.FC<ChartSectionProps> = ({
             </button>
             <button
               onClick={() => setChartMode('TERMINAL_ANALYTICS')}
-              className={`px-2 py-0.5 rounded text-[11px] font-mono font-semibold transition-colors ${
+              className={`px-2.5 py-0.5 rounded text-[11px] font-mono font-semibold transition-colors flex items-center gap-1 ${
                 chartMode === 'TERMINAL_ANALYTICS'
                   ? 'bg-blue-600 text-white'
                   : 'text-zinc-400 hover:text-zinc-200'
               }`}
             >
+              <Zap className="w-3 h-3 text-amber-400" />
               Overlay Engine
             </button>
           </div>
@@ -343,7 +423,7 @@ export const ChartSection: React.FC<ChartSectionProps> = ({
       )}
 
       {/* Chart Canvas or TradingView Embed */}
-      <div className="relative w-full bg-[#0a0d14] min-h-[420px] sm:min-h-[480px]">
+      <div className="relative w-full bg-[#0a0d14] min-h-[440px] sm:min-h-[480px]">
         {chartMode === 'TRADINGVIEW' ? (
           <iframe
             title="TradingView OANDA XAUUSD"
@@ -352,9 +432,7 @@ export const ChartSection: React.FC<ChartSectionProps> = ({
             allowFullScreen
           />
         ) : (
-          <div className="w-full h-[420px] p-2 flex items-center justify-center">
-            <canvas ref={canvasRef} className="w-full h-full block" />
-          </div>
+          <div ref={chartContainerRef} className="w-full h-[440px] sm:h-[480px]" />
         )}
       </div>
 
@@ -364,8 +442,9 @@ export const ChartSection: React.FC<ChartSectionProps> = ({
           <ShieldCheck className="w-3 h-3 text-emerald-500" />
           Primary reference: OANDA:XAUUSD • Timeframe: {timeframe.toUpperCase()}
         </span>
-        <span>Zero scraping • Official TradingView embed compliant</span>
+        <span>TradingView Engine Synced • Real-Time Spot Data</span>
       </div>
     </div>
   );
 };
+

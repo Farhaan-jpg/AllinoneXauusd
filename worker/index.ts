@@ -133,49 +133,98 @@ export default {
         });
       }
 
-      // 6. /api/quote/xauusd
+      // 6. /api/quote/xauusd - Real-Time OANDA:XAUUSD Feed
       if (path === '/api/quote/xauusd') {
         let price = 0;
+        let open24h = 0;
         let high24h = 0;
         let low24h = 0;
         let change24h = 0;
         let changePercent24h = 0;
+        let bid = 0;
+        let ask = 0;
+        let spread = 0.5;
         let volume = 0;
-        let source = 'PAXG/USDT (1oz Gold Proxy)';
+        let source = 'TradingView OANDA:XAUUSD Feed';
 
         try {
-          const res = await fetch('https://data-api.binance.vision/api/v3/ticker/24hr?symbol=PAXGUSDT', {
-            headers: { 'User-Agent': 'Mozilla/5.0' },
+          // Primary: TradingView CFD Scanner for OANDA:XAUUSD
+          const tvRes = await fetch('https://scanner.tradingview.com/cfd/scan', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            },
+            body: JSON.stringify({
+              symbols: { tickers: ['OANDA:XAUUSD'] },
+              columns: ['close', 'open', 'high', 'low', 'change', 'change_abs', 'bid', 'ask', 'volume'],
+            }),
           });
-          if (res.ok) {
-            const data: any = await res.json();
-            price = parseFloat(data.lastPrice);
-            high24h = parseFloat(data.highPrice);
-            low24h = parseFloat(data.lowPrice);
-            change24h = parseFloat(data.priceChange);
-            changePercent24h = parseFloat(data.priceChangePercent);
-            volume = parseFloat(data.volume);
-            source = 'Binance Vision PAXG/USDT 1oz Physical Gold Proxy';
+
+          if (tvRes.ok) {
+            const tvData: any = await tvRes.json();
+            const d = tvData.data?.[0]?.d;
+            if (Array.isArray(d) && d[0] > 0) {
+              price = parseFloat(d[0]);
+              open24h = parseFloat(d[1]) || price;
+              high24h = parseFloat(d[2]) || price;
+              low24h = parseFloat(d[3]) || price;
+              changePercent24h = parseFloat(d[4]) || 0;
+              change24h = parseFloat(d[5]) || 0;
+              bid = parseFloat(d[6]) || (price - 0.25);
+              ask = parseFloat(d[7]) || (price + 0.25);
+              spread = parseFloat((ask - bid).toFixed(2));
+              volume = parseFloat(d[8]) || 0;
+            } else {
+              throw new Error('No OANDA data in TV scanner');
+            }
           } else {
-            throw new Error(`Binance Vision status: ${res.status}`);
+            throw new Error(`TV Scanner status: ${tvRes.status}`);
           }
         } catch {
-          // Fallback to Yahoo Finance Gold Futures (GC=F)
-          const yRes = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1m&range=1d', {
-            headers: { 'User-Agent': 'Mozilla/5.0' },
-          });
-          if (yRes.ok) {
-            const yData: any = await yRes.json();
-            const meta = yData.chart?.result?.[0]?.meta;
-            if (meta) {
-              price = meta.regularMarketPrice;
-              const prev = meta.previousClose || meta.chartPreviousClose || price;
-              change24h = price - prev;
-              changePercent24h = (change24h / prev) * 100;
-              high24h = meta.regularMarketDayHigh || price;
-              low24h = meta.regularMarketDayLow || price;
-              volume = meta.regularMarketVolume || 0;
-              source = 'Yahoo Finance COMEX Gold (GC=F)';
+          // Secondary fallback: gold-api.com live spot price
+          try {
+            const gRes = await fetch('https://api.gold-api.com/price/XAU', {
+              headers: { 'User-Agent': 'Mozilla/5.0' },
+            });
+            if (gRes.ok) {
+              const gData: any = await gRes.json();
+              if (gData.price > 0) {
+                price = parseFloat(gData.price);
+                open24h = price;
+                high24h = price;
+                low24h = price;
+                bid = price - 0.3;
+                ask = price + 0.3;
+                spread = 0.6;
+                source = 'Gold-API Spot Live (XAU/USD)';
+              }
+            }
+          } catch {
+            // Tertiary fallback: Yahoo Finance Gold Futures (GC=F)
+            try {
+              const yRes = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1m&range=1d', {
+                headers: { 'User-Agent': 'Mozilla/5.0' },
+              });
+              if (yRes.ok) {
+                const yData: any = await yRes.json();
+                const meta = yData.chart?.result?.[0]?.meta;
+                if (meta) {
+                  price = meta.regularMarketPrice;
+                  const prev = meta.previousClose || meta.chartPreviousClose || price;
+                  change24h = price - prev;
+                  changePercent24h = (change24h / prev) * 100;
+                  high24h = meta.regularMarketDayHigh || price;
+                  low24h = meta.regularMarketDayLow || price;
+                  open24h = meta.regularMarketOpen || prev;
+                  bid = price - 0.25;
+                  ask = price + 0.25;
+                  volume = meta.regularMarketVolume || 0;
+                  source = 'Yahoo Finance COMEX Gold (GC=F)';
+                }
+              }
+            } catch {
+              // ignore
             }
           }
         }
@@ -184,17 +233,22 @@ export default {
           {
             symbol: 'OANDA:XAUUSD',
             price,
+            bid,
+            ask,
+            spread,
             high24h,
             low24h,
-            change24h,
-            changePercent24h,
+            open24h,
+            change24h: parseFloat(change24h.toFixed(2)),
+            changePercent24h: parseFloat(changePercent24h.toFixed(2)),
+            prevClose: parseFloat((price - change24h).toFixed(2)),
             volume,
             timestamp: Date.now(),
             source,
-            status: price > 0 ? 'live' : 'fallback',
+            status: price > 0 ? 'LIVE' : 'FALLBACK',
           },
           corsHeaders,
-          3 // 3s edge cache
+          1 // 1s edge cache for real-time second-by-second updates
         );
       }
 
