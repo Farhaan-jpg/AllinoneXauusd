@@ -262,6 +262,7 @@ export interface TerminalSettings {
   timezone: string;
   theme: 'dark';
   soundAlerts: boolean;
+  voiceAlerts?: boolean;
   browserNotifications: boolean;
   newsFilterThreshold: 'HIGH' | 'MEDIUM' | 'LOW';
   telegramBotToken?: string;

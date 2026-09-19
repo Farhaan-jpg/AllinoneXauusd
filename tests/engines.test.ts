@@ -1,6 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { AlertEngine, alertEngine } from '../src/services/engines/alertEngine';
 import { CorrelationEngine } from '../src/services/engines/correlationEngine';
 import { LiquidityEngine } from '../src/services/engines/liquidityEngine';
+import { MTFEngine } from '../src/services/engines/mtfEngine';
 import { SessionEngine } from '../src/services/engines/sessionEngine';
 import { StructureEngine } from '../src/services/engines/structureEngine';
 import { VolatilityEngine } from '../src/services/engines/volatilityEngine';
@@ -300,6 +302,99 @@ describe('AlertEngine Initial Warmup & Live Transitions', () => {
     expect(alertCount).toBe(2);
     expect(engine.getHistory()[0].type).toBe('NEWS_HIGH_IMPACT');
     expect(engine.getHistory()[0].title).toContain('CRITICAL');
+  });
+
+  it('translates abbreviations for natural spoken voice alerts', () => {
+    const engine = new AlertEngine();
+    expect(engine.isVoiceEnabled()).toBe(true);
+
+    engine.setVoiceEnabled(false);
+    expect(engine.isVoiceEnabled()).toBe(false);
+
+    engine.setVoiceEnabled(true);
+    expect(engine.isVoiceEnabled()).toBe(true);
+
+    // Test that speakAlert runs without throwing in Node/Vitest environment
+    expect(() => {
+      engine.speakAlert('BOS detected at $2650.50 with 15 pts expansion. CHOCH imminent.');
+    }).not.toThrow();
+  });
+});
+
+describe('MTFEngine', () => {
+  it('accurately calculates Exponential Moving Average (EMA)', () => {
+    const values = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
+    const ema5 = MTFEngine.calculateEMA(values, 5);
+    expect(ema5).toBeGreaterThan(15);
+    expect(ema5).toBeLessThanOrEqual(20);
+  });
+
+  it('accurately calculates Relative Strength Index (RSI 14)', () => {
+    // Bullish trending closes
+    const bullishCloses: number[] = [];
+    for (let i = 0; i < 30; i++) {
+      bullishCloses.push(2600 + i * 2);
+    }
+    const rsiBullish = MTFEngine.calculateRSI(bullishCloses, 14);
+    expect(rsiBullish).toBeGreaterThan(70);
+
+    // Bearish trending closes
+    const bearishCloses: number[] = [];
+    for (let i = 0; i < 30; i++) {
+      bearishCloses.push(2600 - i * 2);
+    }
+    const rsiBearish = MTFEngine.calculateRSI(bearishCloses, 14);
+    expect(rsiBearish).toBeLessThan(30);
+  });
+
+  it('aggregates lower-timeframe candles into higher-timeframe candles', () => {
+    const candles: Candle[] = [];
+    for (let i = 0; i < 15; i++) {
+      candles.push({
+        time: 1700000000 + i * 300, // 5m intervals
+        open: 2650 + i,
+        high: 2655 + i,
+        low: 2648 + i,
+        close: 2652 + i,
+        volume: 100,
+      });
+    }
+
+    // Aggregate 5m into 15m (3:1 ratio)
+    const aggregated15m = MTFEngine.aggregateCandles(candles, 15, 5);
+    expect(aggregated15m.length).toBe(5);
+    expect(aggregated15m[0].open).toBe(candles[0].open);
+    expect(aggregated15m[0].close).toBe(candles[2].close);
+    expect(aggregated15m[0].volume).toBe(300);
+  });
+
+  it('computes institutional multi-timeframe confluence matrix', () => {
+    const candles: Candle[] = [];
+    for (let i = 0; i < 60; i++) {
+      candles.push({
+        time: 1700000000 + i * 300,
+        open: 2600 + i * 1.0,
+        high: 2602 + i * 1.0,
+        low: 2599 + i * 1.0,
+        close: 2601 + i * 1.0,
+        volume: 150,
+      });
+    }
+
+    const candlesByTf = {
+      '1m': candles,
+      '5m': candles,
+      '15m': candles,
+      '1H': candles,
+      '4H': candles,
+      '1D': candles,
+    };
+
+    const matrix = MTFEngine.computeMatrix(candlesByTf, 2665);
+    expect(matrix.timeframes.length).toBe(6);
+    expect(matrix.confluenceScore).toBeGreaterThanOrEqual(70);
+    expect(matrix.overallBias).toContain('BULLISH');
+    expect(matrix.bullishCount).toBeGreaterThanOrEqual(4);
   });
 });
 

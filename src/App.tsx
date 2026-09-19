@@ -9,6 +9,7 @@ import { LiquidityOrderFlowPanel } from './components/LiquidityOrderFlowPanel';
 import { MacroPanel } from './components/MacroPanel';
 import { MarketRegimeCard } from './components/MarketRegimeCard';
 import { MobileNav, MobileTab } from './components/MobileNav';
+import { MTFMatrixPanel } from './components/MTFMatrixPanel';
 import { NewsPanel } from './components/NewsPanel';
 import { SettingsModal } from './components/SettingsModal';
 import { ZonesAlertsPanel } from './components/ZonesAlertsPanel';
@@ -16,6 +17,7 @@ import { ZonesAlertsPanel } from './components/ZonesAlertsPanel';
 import { alertEngine } from './services/engines/alertEngine';
 import { CorrelationEngine } from './services/engines/correlationEngine';
 import { LiquidityEngine } from './services/engines/liquidityEngine';
+import { MTFEngine, MTFMatrixState } from './services/engines/mtfEngine';
 import { OrderFlowEngine } from './services/engines/orderFlowEngine';
 import { RegimeEngine } from './services/engines/regimeEngine';
 import { SessionEngine } from './services/engines/sessionEngine';
@@ -59,6 +61,7 @@ const DEFAULT_SETTINGS: TerminalSettings = {
   timezone: 'Asia/Kolkata',
   theme: 'dark',
   soundAlerts: true,
+  voiceAlerts: true,
   browserNotifications: false,
   newsFilterThreshold: 'MEDIUM',
   telegramBotToken: '',
@@ -203,6 +206,12 @@ export const App: React.FC = () => {
   );
   const [regime, setRegime] = useState<MarketRegime | null>(null);
 
+  // --- MULTI-TIMEFRAME (MTF) MATRIX STATE (Feature 5) ---
+  const [candlesByTf, setCandlesByTf] = useState<Partial<Record<Timeframe, Candle[]>>>({});
+  const [mtfState, setMtfState] = useState<MTFMatrixState>(() =>
+    MTFEngine.computeMatrix({}, 2650)
+  );
+
   // --- PROVIDER HEALTH & ALERTS ---
   const [providers, setProviders] = useState<ProviderHealth[]>(() =>
     providerStatusManager.getAll()
@@ -213,6 +222,7 @@ export const App: React.FC = () => {
   // Subscribe to AlertEngine and ProviderHealth
   useEffect(() => {
     alertEngine.setSoundEnabled(settings.soundAlerts);
+    alertEngine.setVoiceEnabled(settings.voiceAlerts ?? true);
     const unsubAlerts = alertEngine.subscribe(() => {
       setAlertEvents([...alertEngine.getHistory()]);
     });
@@ -223,7 +233,7 @@ export const App: React.FC = () => {
       unsubAlerts();
       unsubHealth();
     };
-  }, [settings.soundAlerts]);
+  }, [settings.soundAlerts, settings.voiceAlerts]);
 
   // Update session info every minute
   useEffect(() => {
@@ -260,6 +270,10 @@ export const App: React.FC = () => {
     try {
       const c = await marketDataProvider.getCandles(currentTimeframe, 150);
       setCandles(c);
+      setCandlesByTf(prev => ({
+        ...prev,
+        [currentTimeframe]: c,
+      }));
     } catch (e) {
       console.warn('Candle fetch error:', e);
     }
@@ -270,6 +284,27 @@ export const App: React.FC = () => {
     const timer = setInterval(fetchCandles, 10000);
     return () => clearInterval(timer);
   }, [fetchCandles]);
+
+  // Preload other timeframes in background with low frequency (every 60s)
+  useEffect(() => {
+    const preloadOtherTimeframes = async () => {
+      const otherTfs: Timeframe[] = (['1m', '5m', '15m', '1H', '4H', '1D'] as Timeframe[])
+        .filter(tf => tf !== currentTimeframe);
+      for (const tf of otherTfs) {
+        try {
+          const c = await marketDataProvider.getCandles(tf, 60);
+          if (c.length > 0) {
+            setCandlesByTf(prev => ({ ...prev, [tf]: c }));
+          }
+        } catch {
+          // ignore background fetch error
+        }
+      }
+    };
+    preloadOtherTimeframes();
+    const interval = setInterval(preloadOtherTimeframes, 60000);
+    return () => clearInterval(interval);
+  }, [currentTimeframe]);
 
   // 3. Macro Loop (every 15s)
   const fetchMacro = useCallback(async () => {
@@ -385,7 +420,14 @@ export const App: React.FC = () => {
         sendNewsAlerts: settings.telegramNewsAlerts ?? true,
       }
     );
-  }, [quote, candles, macro, calendarEvents, newsArticles, profileRange, correlationWindow, settings.telegramBotToken, settings.telegramChatId, settings.telegramNewsAlerts]);
+
+    // 10. Multi-Timeframe Matrix (Feature 5)
+    const newMtf = MTFEngine.computeMatrix(
+      { ...candlesByTf, [currentTimeframe]: candles },
+      quote.price
+    );
+    setMtfState(newMtf);
+  }, [quote, candles, macro, calendarEvents, newsArticles, profileRange, correlationWindow, settings.telegramBotToken, settings.telegramChatId, settings.telegramNewsAlerts, candlesByTf, currentTimeframe]);
 
   // --- SETTINGS HANDLERS ---
   const handleSaveSettings = (newSettings: TerminalSettings) => {
@@ -434,6 +476,13 @@ export const App: React.FC = () => {
 
       {/* 3. Main Terminal Content Grid */}
       <main className="max-w-7xl w-full mx-auto px-2 sm:px-4 py-3 sm:py-4 space-y-4 flex-1">
+        {/* Multi-Timeframe Trend Matrix Ribbon (Feature 5) */}
+        <MTFMatrixPanel
+          matrixState={mtfState}
+          currentTimeframe={currentTimeframe}
+          onSelectTimeframe={handleSelectTimeframe}
+        />
+
         {/* Mobile Tab Filtering: On mobile (screen < lg), switch views cleanly */}
         <div className="lg:block">
           {/* CHART VIEW (Shown on desktop OR when mobileTab is OVERVIEW or CHART) */}

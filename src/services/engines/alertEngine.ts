@@ -9,6 +9,7 @@ export class AlertEngine {
   private cooldownMap: Map<string, number> = new Map();
   private readonly COOLDOWN_MS = 300000; // 5 minute cooldown per alert trigger
   private soundEnabled = true;
+  private voiceEnabled = true;
 
   // Session baseline & transition tracking to prevent alerts on page load
   private isInitialized = false;
@@ -27,6 +28,62 @@ export class AlertEngine {
 
   public setSoundEnabled(enabled: boolean) {
     this.soundEnabled = enabled;
+  }
+
+  public setVoiceEnabled(enabled: boolean) {
+    this.voiceEnabled = enabled;
+  }
+
+  public isVoiceEnabled(): boolean {
+    return this.voiceEnabled;
+  }
+
+  /**
+   * Natural voice speech synthesis using browser's native window.speechSynthesis
+   */
+  public speakAlert(text: string) {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+
+    try {
+      // Cancel previous utterance to avoid queue buildup
+      window.speechSynthesis.cancel();
+
+      // Clean and translate trader abbreviations for smooth, natural speech
+      const cleanText = text
+        .replace(/BOS/g, 'Break of Structure')
+        .replace(/CHOCH/g, 'Change of Character')
+        .replace(/PDH/g, 'Previous Day High')
+        .replace(/PDL/g, 'Previous Day Low')
+        .replace(/EQH/g, 'Equal Highs')
+        .replace(/EQL/g, 'Equal Lows')
+        .replace(/pts/g, 'points')
+        .replace(/bps/g, 'basis points')
+        .replace(/m\/m/g, 'month over month')
+        .replace(/y\/y/g, 'year over year')
+        .replace(/\$([0-9.]+)/g, '$1 dollars')
+        .replace(/[⚡🔄🚨⚠️📊📰🔔🎯📍📈]/g, '')
+        .trim();
+
+      const utterance = new SpeechSynthesisUtterance(cleanText);
+      utterance.rate = 1.05; // slightly faster for urgent trading context
+      utterance.pitch = 1.0;
+      utterance.volume = 0.95;
+
+      // Select an English voice if available
+      const voices = window.speechSynthesis.getVoices();
+      const preferredVoice = voices.find(v => v.lang.startsWith('en') && (v.name.includes('Google') || v.name.includes('Natural') || v.name.includes('Samantha') || v.name.includes('Daniel')));
+      if (preferredVoice) {
+        utterance.voice = preferredVoice;
+      }
+
+      window.speechSynthesis.speak(utterance);
+    } catch {
+      // Voice synthesis blocked by browser permission or unsupported
+    }
+  }
+
+  public testVoiceAnnouncement() {
+    this.speakAlert('Gold Intelligence Terminal: Voice alert dispatcher connected. All systems operational.');
   }
 
   public getRules(): AlertRule[] {
@@ -289,6 +346,10 @@ export class AlertEngine {
 
     if (this.soundEnabled) {
       this.playChime(event.level);
+    }
+
+    if (this.voiceEnabled) {
+      this.speakAlert(`${event.title}. ${event.message}`);
     }
 
     this.showBrowserNotification(event.title, event.message);

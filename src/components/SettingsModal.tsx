@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Bell, Key, Save, Send, Settings, ShieldCheck, X } from 'lucide-react';
+import { alertEngine } from '../services/engines/alertEngine';
 import { TerminalSettings, Timeframe } from '../types/market';
 
 interface SettingsModalProps {
@@ -170,7 +171,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {/* Notifications & Audio */}
           <div className="space-y-2.5 border-t border-zinc-800 pt-3">
             <div className="text-amber-400 font-bold uppercase tracking-wider text-[11px]">
-              Alerts & Notifications
+              Alerts & Audio Announcements
             </div>
 
             <div className="flex items-center justify-between p-2 rounded bg-[#121620] border border-[#1e2433]">
@@ -184,6 +185,35 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 onChange={e => setFormData({ ...formData, soundAlerts: e.target.checked })}
                 className="accent-amber-500 h-4 w-4 rounded"
               />
+            </div>
+
+            {/* Voice Audio Announcements (Feature 3) */}
+            <div className="flex items-center justify-between p-2 rounded bg-[#121620] border border-[#1e2433]">
+              <div className="flex-1 pr-3">
+                <div className="font-bold text-zinc-200 flex items-center gap-1.5">
+                  <span>Spoken Voice Announcements</span>
+                  <span className="text-[9px] bg-amber-500/20 text-amber-300 px-1 py-0.5 rounded font-mono">100% FREE</span>
+                </div>
+                <div className="text-[10px] text-zinc-400">
+                  Speaks market transitions (BOS, CHOCH, Liquidity Sweep, Breaking News) using natural browser speech synthesis.
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => alertEngine.testVoiceAnnouncement()}
+                  className="px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[10px] font-bold border border-zinc-700 whitespace-nowrap"
+                  title="Test voice speech output"
+                >
+                  🔊 Test Voice
+                </button>
+                <input
+                  type="checkbox"
+                  checked={formData.voiceAlerts ?? true}
+                  onChange={e => setFormData({ ...formData, voiceAlerts: e.target.checked })}
+                  className="accent-amber-500 h-4 w-4 rounded cursor-pointer"
+                />
+              </div>
             </div>
 
             <div className="flex items-center justify-between p-2 rounded bg-[#121620] border border-[#1e2433]">
@@ -201,11 +231,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           </div>
 
-          {/* Telegram Dispatcher */}
+          {/* Telegram Dispatcher & Interactive 2-Way Bot (Feature 4) */}
           <div className="space-y-2.5 border-t border-zinc-800 pt-3">
             <div className="text-amber-400 font-bold uppercase tracking-wider text-[11px] flex items-center gap-1.5">
               <Send className="w-3.5 h-3.5" />
-              <span>Optional Telegram Bot Integration</span>
+              <span>Interactive Two-Way Telegram Bot & Dispatcher</span>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
@@ -244,6 +274,44 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 onChange={e => setFormData({ ...formData, telegramNewsAlerts: e.target.checked })}
                 className="accent-amber-500 h-4 w-4 rounded cursor-pointer"
               />
+            </div>
+
+            {/* Interactive Bot Commands & Webhook Registration */}
+            <div className="p-2.5 rounded bg-[#0b0e14] border border-[#1e2433] space-y-2">
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="text-zinc-200 font-bold">2-Way Telegram Bot Commands</span>
+                  <p className="text-[10px] text-zinc-400">
+                    Interact with your bot in Telegram: <code className="text-amber-400">/price</code>, <code className="text-amber-400">/bias</code>, <code className="text-amber-400">/news</code>, <code className="text-amber-400">/setalert &lt;price&gt;</code>
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (!formData.telegramBotToken) {
+                      setTelegramStatus('Please enter your Telegram Bot Token above first.');
+                      return;
+                    }
+                    setTelegramStatus('Registering bot webhook with Telegram...');
+                    try {
+                      const webhookUrl = `${window.location.origin}/api/telegram-webhook?token=${encodeURIComponent(formData.telegramBotToken)}`;
+                      const res = await fetch(`https://api.telegram.org/bot${formData.telegramBotToken}/setWebhook?url=${encodeURIComponent(webhookUrl)}`);
+                      const data = await res.json();
+                      if (data.ok) {
+                        setTelegramStatus('✅ Webhook registered! You can now send /price, /bias, /news in Telegram.');
+                        onSave(formData);
+                      } else {
+                        setTelegramStatus(`❌ Webhook error: ${data.description || 'Failed to register'}`);
+                      }
+                    } catch (err) {
+                      setTelegramStatus(`❌ Network error registering webhook: ${String(err)}`);
+                    }
+                  }}
+                  className="px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-400 text-zinc-950 font-bold text-[11px] whitespace-nowrap shadow"
+                >
+                  ⚡ 1-Click Register Webhook
+                </button>
+              </div>
             </div>
 
             <div className="flex items-center justify-between">
