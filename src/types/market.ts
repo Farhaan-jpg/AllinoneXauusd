@@ -266,6 +266,7 @@ export interface TerminalSettings {
   newsFilterThreshold: 'HIGH' | 'MEDIUM' | 'LOW';
   telegramBotToken?: string;
   telegramChatId?: string;
+  telegramNewsAlerts?: boolean;
   userApiKeys: {
     fredApiKey?: string;
     finnhubKey?: string;

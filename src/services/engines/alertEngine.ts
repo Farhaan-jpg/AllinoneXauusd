@@ -1,4 +1,4 @@
-import { AlertEvent, AlertRule, EconomicEvent, LiquidityLevel, MarketQuote, MarketStructureState, OrderFlowState, TradingZone } from '../../types/market';
+import { AlertEvent, AlertRule, EconomicEvent, LiquidityLevel, MarketQuote, MarketStructureState, NewsArticle, OrderFlowState, TradingZone } from '../../types/market';
 
 type AlertCallback = (event: AlertEvent) => void;
 
@@ -18,6 +18,8 @@ export class AlertEngine {
   private insideZoneIds: Set<string> = new Set();
   private sweptLevelIds: Set<string> = new Set();
   private triggeredNewsIds: Set<string> = new Set();
+  private seenNewsArticleIds: Set<string> = new Set();
+  private seenReleasedEventIds: Set<string> = new Set();
 
   constructor() {
     this.loadPersistedRules();
@@ -43,6 +45,8 @@ export class AlertEngine {
     this.insideZoneIds.clear();
     this.sweptLevelIds.clear();
     this.triggeredNewsIds.clear();
+    this.seenNewsArticleIds.clear();
+    this.seenReleasedEventIds.clear();
     this.cooldownMap.clear();
   }
 
@@ -91,7 +95,8 @@ export class AlertEngine {
     liquidity: LiquidityLevel[],
     orderFlow: OrderFlowState,
     upcomingEvents: EconomicEvent[],
-    telegramConfig?: { botToken?: string; chatId?: string }
+    newsArticles?: NewsArticle[],
+    telegramConfig?: { botToken?: string; chatId?: string; sendNewsAlerts?: boolean }
   ) {
     const now = Date.now();
 
@@ -113,6 +118,12 @@ export class AlertEngine {
       upcomingEvents
         .filter(e => e.isHighImpact && e.country === 'USD' && e.timestamp > now && (e.timestamp - now) <= 15 * 60 * 1000)
         .forEach(e => this.triggeredNewsIds.add(e.id));
+      upcomingEvents
+        .filter(e => e.actual)
+        .forEach(e => this.seenReleasedEventIds.add(e.id));
+      if (newsArticles && newsArticles.length > 0) {
+        newsArticles.forEach(a => this.seenNewsArticleIds.add(a.id));
+      }
       return;
     }
 
@@ -193,18 +204,62 @@ export class AlertEngine {
 
     if (imminentNews && !this.triggeredNewsIds.has(imminentNews.id)) {
       this.triggeredNewsIds.add(imminentNews.id);
+      const shouldSendTg = telegramConfig?.sendNewsAlerts !== false;
       this.dispatchAlert({
-        id: `evt_news_${now}`,
+        id: `evt_news_cd_${imminentNews.id}_${now}`,
         type: 'NEWS_HIGH_IMPACT',
-        title: `Upcoming Event Risk: ${imminentNews.title}`,
+        title: `⚠️ Event Risk: ${imminentNews.title}`,
         message: `${imminentNews.title} releases in ${imminentNews.countdownText}. XAUUSD spread and volatility may surge.`,
         timestamp: now,
         level: 'critical',
         read: false,
-      }, telegramConfig);
+      }, shouldSendTg ? telegramConfig : undefined);
     }
 
-    // 3. Liquidity Sweep Alert (Built-in)
+    // 3. High-Impact Economic Data Release Alert (When actual number drops)
+    const freshRelease = upcomingEvents.find(
+      e => e.isHighImpact && e.country === 'USD' && e.actual && !this.seenReleasedEventIds.has(e.id) && Math.abs(now - e.timestamp) < 45 * 60 * 1000
+    );
+    if (freshRelease) {
+      this.seenReleasedEventIds.add(freshRelease.id);
+      const shouldSendTg = telegramConfig?.sendNewsAlerts !== false;
+      this.dispatchAlert({
+        id: `evt_news_rel_${freshRelease.id}_${now}`,
+        type: 'NEWS_HIGH_IMPACT',
+        title: `📊 Economic Release: ${freshRelease.title}`,
+        message: `${freshRelease.title} reported: Actual ${freshRelease.actual} (Forecast: ${freshRelease.forecast || 'N/A'}, Previous: ${freshRelease.previous || 'N/A'}).`,
+        timestamp: now,
+        level: 'critical',
+        read: false,
+      }, shouldSendTg ? telegramConfig : undefined);
+    }
+
+    // 4. Real-Time Breaking High-Impact News Articles
+    if (newsArticles && newsArticles.length > 0) {
+      for (const article of newsArticles) {
+        if (this.seenNewsArticleIds.has(article.id)) continue;
+        this.seenNewsArticleIds.add(article.id);
+
+        const isHighImpact = article.relevance === 'CRITICAL' || article.relevance === 'HIGH';
+        const isRecent = now - article.publishedAt < 60 * 60 * 1000;
+
+        if (isHighImpact && isRecent) {
+          const shouldSendTg = telegramConfig?.sendNewsAlerts !== false;
+          const impactLabel = article.relevance === 'CRITICAL' ? '🚨 CRITICAL' : '⚡ HIGH IMPACT';
+          this.dispatchAlert({
+            id: `evt_news_art_${article.id}`,
+            type: 'NEWS_HIGH_IMPACT',
+            title: `${impactLabel} NEWS: ${article.headline}`,
+            message: `Source: ${article.source} • Category: ${article.category} • Impact: ${article.relevance}${article.marketRelevanceComment ? `\n\nAnalysis: ${article.marketRelevanceComment}` : ''}${article.url ? `\n\nLink: ${article.url}` : ''}`,
+            timestamp: now,
+            level: article.relevance === 'CRITICAL' ? 'critical' : 'warning',
+            read: false,
+          }, shouldSendTg ? telegramConfig : undefined);
+        }
+      }
+    }
+
+    // 5. Liquidity Sweep Alert (Built-in)
     const newSweep = liquidity.find(
       l => l.status === 'SWEPT' && l.distancePips < 1.0 && !this.sweptLevelIds.has(l.id)
     );
@@ -239,7 +294,8 @@ export class AlertEngine {
     this.showBrowserNotification(event.title, event.message);
 
     if (telegramConfig?.botToken && telegramConfig?.chatId) {
-      this.sendTelegram(telegramConfig.botToken, telegramConfig.chatId, `🔔 *XAUUSD Terminal Alert*\n\n*${event.title}*\n${event.message}\n_Level: ${event.level.toUpperCase()}_`);
+      const header = event.type === 'NEWS_HIGH_IMPACT' ? '📰 *XAUUSD High-Impact News Alert*' : '🔔 *XAUUSD Terminal Alert*';
+      this.sendTelegram(telegramConfig.botToken, telegramConfig.chatId, `${header}\n\n*${event.title}*\n${event.message}\n_Priority: ${event.level.toUpperCase()}_`);
     }
 
     this.listeners.forEach(fn => fn(event));

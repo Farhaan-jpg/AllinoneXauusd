@@ -63,6 +63,7 @@ const DEFAULT_SETTINGS: TerminalSettings = {
   newsFilterThreshold: 'MEDIUM',
   telegramBotToken: '',
   telegramChatId: '',
+  telegramNewsAlerts: true,
   userApiKeys: {},
 };
 
@@ -377,12 +378,14 @@ export const App: React.FC = () => {
       newLiquidity,
       newOrderFlow,
       calendarEvents,
+      newsArticles,
       {
         botToken: settings.telegramBotToken,
         chatId: settings.telegramChatId,
+        sendNewsAlerts: settings.telegramNewsAlerts ?? true,
       }
     );
-  }, [quote, candles, macro, calendarEvents, profileRange, correlationWindow, settings.telegramBotToken, settings.telegramChatId]);
+  }, [quote, candles, macro, calendarEvents, newsArticles, profileRange, correlationWindow, settings.telegramBotToken, settings.telegramChatId, settings.telegramNewsAlerts]);
 
   // --- SETTINGS HANDLERS ---
   const handleSaveSettings = (newSettings: TerminalSettings) => {

@@ -232,6 +232,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </div>
             </div>
 
+            {/* Real-Time High-Impact News Alerts via Telegram */}
+            <div className="flex items-center justify-between p-2 rounded bg-[#121620] border border-[#1e2433]">
+              <div>
+                <div className="font-bold text-zinc-200">Real-Time High-Impact News Alerts</div>
+                <div className="text-[10px] text-zinc-500">Send breaking geopolitical, Fed, inflation & calendar releases to Telegram</div>
+              </div>
+              <input
+                type="checkbox"
+                checked={formData.telegramNewsAlerts ?? true}
+                onChange={e => setFormData({ ...formData, telegramNewsAlerts: e.target.checked })}
+                className="accent-amber-500 h-4 w-4 rounded cursor-pointer"
+              />
+            </div>
+
             <div className="flex items-center justify-between">
               <button
                 type="button"

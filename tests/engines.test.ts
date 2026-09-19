@@ -278,6 +278,28 @@ describe('AlertEngine Initial Warmup & Live Transitions', () => {
     expect(alertCount).toBe(1);
     expect(engine.getHistory().length).toBe(1);
     expect(engine.getHistory()[0].title).toBe('Target 2655');
+
+    // THIRD EVALUATION: Real-time breaking high-impact news arrival
+    const breakingNews = [
+      {
+        id: 'news_critical_1',
+        headline: 'Federal Reserve Announces Emergency 50bps Rate Cut Amid Liquidity Strain',
+        source: 'Reuters',
+        url: 'https://reuters.com/markets',
+        publishedAt: Date.now() - 60000, // 1 minute ago
+        publishedFormatted: '1m ago',
+        category: 'FED' as const,
+        relevance: 'CRITICAL' as const,
+        marketRelevanceComment: 'Aggressive dovish pivot significantly bullish for physical and spot gold.',
+      },
+    ];
+
+    engine.evaluate(crossedQuote, dummyStructure, dummyZones, dummyLiquidity, dummyOrderFlow, [], breakingNews);
+
+    // Alert count increments by 1 for the breaking news
+    expect(alertCount).toBe(2);
+    expect(engine.getHistory()[0].type).toBe('NEWS_HIGH_IMPACT');
+    expect(engine.getHistory()[0].title).toContain('CRITICAL');
   });
 });
 
