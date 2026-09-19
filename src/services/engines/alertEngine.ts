@@ -10,6 +10,15 @@ export class AlertEngine {
   private readonly COOLDOWN_MS = 300000; // 5 minute cooldown per alert trigger
   private soundEnabled = true;
 
+  // Session baseline & transition tracking to prevent alerts on page load
+  private isInitialized = false;
+  private lastPrice: number | null = null;
+  private lastBosSignature: string | null = null;
+  private lastChochSignature: string | null = null;
+  private insideZoneIds: Set<string> = new Set();
+  private sweptLevelIds: Set<string> = new Set();
+  private triggeredNewsIds: Set<string> = new Set();
+
   constructor() {
     this.loadPersistedRules();
   }
@@ -24,6 +33,17 @@ export class AlertEngine {
 
   public getHistory(): AlertEvent[] {
     return [...this.eventHistory];
+  }
+
+  public resetSession() {
+    this.isInitialized = false;
+    this.lastPrice = null;
+    this.lastBosSignature = null;
+    this.lastChochSignature = null;
+    this.insideZoneIds.clear();
+    this.sweptLevelIds.clear();
+    this.triggeredNewsIds.clear();
+    this.cooldownMap.clear();
   }
 
   public addRule(rule: Omit<AlertRule, 'id' | 'createdAt'>): AlertRule {
@@ -60,7 +80,9 @@ export class AlertEngine {
   }
 
   /**
-   * Evaluates all active alert rules against current market state
+   * Evaluates all active alert rules against current market state.
+   * On first run, it establishes baseline states so existing historical
+   * conditions do NOT trigger Telegram alerts or audio chimes on page load.
    */
   public evaluate(
     quote: MarketQuote,
@@ -72,6 +94,29 @@ export class AlertEngine {
     telegramConfig?: { botToken?: string; chatId?: string }
   ) {
     const now = Date.now();
+
+    // --- BASELINE WARMUP ON INITIAL LOAD ---
+    // When the user opens the terminal, record the current baseline and suppress firing
+    // so the user is never spammed with historical events on page load.
+    if (!this.isInitialized) {
+      this.isInitialized = true;
+      this.lastPrice = quote.price;
+      this.lastBosSignature = structure.bos ? `${structure.bos.type}_${structure.bos.price}` : null;
+      this.lastChochSignature = structure.choch ? `${structure.choch.type}_${structure.choch.price}` : null;
+      this.insideZoneIds = new Set(
+        zones.filter(z => quote.price >= z.priceMin && quote.price <= z.priceMax).map(z => z.id)
+      );
+      this.sweptLevelIds = new Set(
+        liquidity.filter(l => l.status === 'SWEPT').map(l => l.id)
+      );
+      // Suppress imminent news alerts if they already exist on initial load
+      upcomingEvents
+        .filter(e => e.isHighImpact && e.country === 'USD' && e.timestamp > now && (e.timestamp - now) <= 15 * 60 * 1000)
+        .forEach(e => this.triggeredNewsIds.add(e.id));
+      return;
+    }
+
+    const prevPrice = this.lastPrice ?? quote.price;
 
     // 1. Evaluate User Configured Rules
     for (const rule of this.rules) {
@@ -85,29 +130,39 @@ export class AlertEngine {
       if (rule.type === 'PRICE_LEVEL') {
         const target = parseFloat(String(rule.targetValue));
         if (!isNaN(target)) {
-          if (rule.condition === 'ABOVE' && quote.price >= target) {
+          // Only trigger on an actual price crossover during live tracking
+          if (rule.condition === 'ABOVE' && prevPrice < target && quote.price >= target) {
             triggered = true;
             message = `Gold price crossed above $${target.toFixed(2)} (Current: $${quote.price.toFixed(2)})`;
-          } else if (rule.condition === 'BELOW' && quote.price <= target) {
+          } else if (rule.condition === 'BELOW' && prevPrice > target && quote.price <= target) {
             triggered = true;
             message = `Gold price dropped below $${target.toFixed(2)} (Current: $${quote.price.toFixed(2)})`;
           }
         }
       } else if (rule.type === 'STRUCTURE_BREAK') {
-        if (structure.bos) {
+        const currentBosSig = structure.bos ? `${structure.bos.type}_${structure.bos.price}` : null;
+        const currentChochSig = structure.choch ? `${structure.choch.type}_${structure.choch.price}` : null;
+
+        if (structure.bos && currentBosSig !== this.lastBosSignature) {
           triggered = true;
+          this.lastBosSignature = currentBosSig;
           message = `Break of Structure detected: ${structure.bos.type} at $${structure.bos.price.toFixed(2)}`;
-        } else if (structure.choch) {
+        } else if (structure.choch && currentChochSig !== this.lastChochSignature) {
           triggered = true;
+          this.lastChochSignature = currentChochSig;
           message = `Change of Character detected: ${structure.choch.type} at $${structure.choch.price.toFixed(2)}`;
         }
       } else if (rule.type === 'ZONE_ENTER') {
-        const activeZone = zones.find(
-          z => z.status === 'ACTIVE' && quote.price >= z.priceMin && quote.price <= z.priceMax
+        // Only trigger if price was NOT already inside the zone
+        const enteredZone = zones.find(
+          z => z.status === 'ACTIVE' &&
+               quote.price >= z.priceMin &&
+               quote.price <= z.priceMax &&
+               !this.insideZoneIds.has(z.id)
         );
-        if (activeZone) {
+        if (enteredZone) {
           triggered = true;
-          message = `Price entered ${activeZone.type} ($${activeZone.priceMin} - $${activeZone.priceMax}) — Reason: ${activeZone.reason}`;
+          message = `Price entered ${enteredZone.type} ($${enteredZone.priceMin.toFixed(2)} - $${enteredZone.priceMax.toFixed(2)}) — Reason: ${enteredZone.reason}`;
         }
       } else if (rule.type === 'VOLUME_SPIKE') {
         if (orderFlow.volumeSpike || orderFlow.deltaSpike) {
@@ -136,41 +191,41 @@ export class AlertEngine {
       e => e.isHighImpact && e.country === 'USD' && e.timestamp > now && (e.timestamp - now) <= 15 * 60 * 1000
     );
 
-    if (imminentNews) {
-      const newsCooldownKey = `news_${imminentNews.id}`;
-      const lastTrigger = this.cooldownMap.get(newsCooldownKey) || 0;
-      if (now - lastTrigger > this.COOLDOWN_MS) {
-        this.cooldownMap.set(newsCooldownKey, now);
-        this.dispatchAlert({
-          id: `evt_news_${now}`,
-          type: 'NEWS_HIGH_IMPACT',
-          title: `Upcoming Event Risk: ${imminentNews.title}`,
-          message: `${imminentNews.title} releases in ${imminentNews.countdownText}. XAUUSD spread and volatility may surge.`,
-          timestamp: now,
-          level: 'critical',
-          read: false,
-        }, telegramConfig);
-      }
+    if (imminentNews && !this.triggeredNewsIds.has(imminentNews.id)) {
+      this.triggeredNewsIds.add(imminentNews.id);
+      this.dispatchAlert({
+        id: `evt_news_${now}`,
+        type: 'NEWS_HIGH_IMPACT',
+        title: `Upcoming Event Risk: ${imminentNews.title}`,
+        message: `${imminentNews.title} releases in ${imminentNews.countdownText}. XAUUSD spread and volatility may surge.`,
+        timestamp: now,
+        level: 'critical',
+        read: false,
+      }, telegramConfig);
     }
 
     // 3. Liquidity Sweep Alert (Built-in)
-    const sweep = liquidity.find(l => l.status === 'SWEPT' && l.distancePips < 1.0);
-    if (sweep) {
-      const sweepKey = `sweep_${sweep.id}`;
-      const lastTrigger = this.cooldownMap.get(sweepKey) || 0;
-      if (now - lastTrigger > this.COOLDOWN_MS) {
-        this.cooldownMap.set(sweepKey, now);
-        this.dispatchAlert({
-          id: `evt_sweep_${now}`,
-          type: 'STRUCTURE_BREAK',
-          title: `Liquidity Sweep: ${sweep.label}`,
-          message: `Price swept ${sweep.label} at $${sweep.price.toFixed(2)}. Monitor for displacement or rejection.`,
-          timestamp: now,
-          level: 'info',
-          read: false,
-        }, telegramConfig);
-      }
+    const newSweep = liquidity.find(
+      l => l.status === 'SWEPT' && l.distancePips < 1.0 && !this.sweptLevelIds.has(l.id)
+    );
+    if (newSweep) {
+      this.sweptLevelIds.add(newSweep.id);
+      this.dispatchAlert({
+        id: `evt_sweep_${now}`,
+        type: 'STRUCTURE_BREAK',
+        title: `Liquidity Sweep: ${newSweep.label}`,
+        message: `Price swept ${newSweep.label} at $${newSweep.price.toFixed(2)}. Monitor for displacement or rejection.`,
+        timestamp: now,
+        level: 'info',
+        read: false,
+      }, telegramConfig);
     }
+
+    // Update tracking state for next evaluation tick
+    this.lastPrice = quote.price;
+    this.insideZoneIds = new Set(
+      zones.filter(z => quote.price >= z.priceMin && quote.price <= z.priceMax).map(z => z.id)
+    );
   }
 
   private dispatchAlert(event: AlertEvent, telegramConfig?: { botToken?: string; chatId?: string }) {

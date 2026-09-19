@@ -184,3 +184,101 @@ describe('NewsProvider Classifier', () => {
   });
 });
 
+describe('AlertEngine Initial Warmup & Live Transitions', () => {
+  it('suppresses alerts on initial evaluation / page load', async () => {
+    const { AlertEngine } = await import('../src/services/engines/alertEngine');
+    const engine = new AlertEngine();
+    engine.resetSession();
+
+    let alertCount = 0;
+    engine.subscribe(() => {
+      alertCount++;
+    });
+
+    const dummyQuote = {
+      price: 2650.0,
+      bid: 2649.8,
+      ask: 2650.2,
+      spread: 0.4,
+      change: 5.0,
+      changePercent: 0.19,
+      high: 2660.0,
+      low: 2640.0,
+      open: 2645.0,
+      timestamp: Date.now(),
+      status: 'LIVE' as const,
+      source: 'Test',
+    };
+
+    const dummyStructure = {
+      trend: 'Bullish' as const,
+      recentSwing: 'HH' as const,
+      bos: { type: 'Bullish BOS' as const, price: 2648.0, time: 1700000000 },
+      choch: null,
+      lastSweep: null,
+      displacement: false,
+      consolidation: false,
+      rangeHigh: 2660.0,
+      rangeLow: 2640.0,
+    };
+
+    const dummyZones = [
+      {
+        id: 'zone_1',
+        type: 'Pullback Zone' as const,
+        priceMin: 2645.0,
+        priceMax: 2655.0,
+        distancePips: 0,
+        strength: 'HIGH' as const,
+        status: 'ACTIVE' as const,
+        reason: 'Test zone',
+      },
+    ];
+
+    const dummyLiquidity = [
+      {
+        id: 'liq_1',
+        label: 'PDH',
+        price: 2655.0,
+        type: 'HIGH' as const,
+        status: 'SWEPT' as const,
+        distancePips: 0.5,
+        timeframe: '5m' as const,
+      },
+    ];
+
+    const dummyOrderFlow = {
+      delta: 100,
+      cumulativeDelta: 500,
+      volumeSpike: false,
+      deltaSpike: false,
+      absorption: false,
+      exhaustion: false,
+    };
+
+    // FIRST EVALUATION: Page load / initial warmup
+    engine.evaluate(dummyQuote, dummyStructure, dummyZones, dummyLiquidity, dummyOrderFlow, []);
+
+    // Crucial check: Zero alerts on page load!
+    expect(alertCount).toBe(0);
+
+    // SECOND EVALUATION: Live price crossover above target
+    engine.addRule({
+      title: 'Target 2655',
+      type: 'PRICE_LEVEL',
+      targetValue: '2655.00',
+      condition: 'ABOVE',
+      enabled: true,
+    });
+
+    const crossedQuote = { ...dummyQuote, price: 2656.0 };
+    engine.evaluate(crossedQuote, dummyStructure, dummyZones, dummyLiquidity, dummyOrderFlow, []);
+
+    // Exactly 1 alert triggered on live crossover
+    expect(alertCount).toBe(1);
+    expect(engine.getHistory().length).toBe(1);
+    expect(engine.getHistory()[0].title).toBe('Target 2655');
+  });
+});
+
+

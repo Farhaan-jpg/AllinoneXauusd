@@ -53,31 +53,96 @@ import {
   VolumeProfile,
 } from './types/market';
 
+const DEFAULT_SETTINGS: TerminalSettings = {
+  defaultSymbol: 'OANDA:XAUUSD',
+  defaultTimeframe: '5m',
+  timezone: 'Asia/Kolkata',
+  theme: 'dark',
+  soundAlerts: true,
+  browserNotifications: false,
+  newsFilterThreshold: 'MEDIUM',
+  telegramBotToken: '',
+  telegramChatId: '',
+  userApiKeys: {},
+};
+
 export const App: React.FC = () => {
   // --- SETTINGS STATE ---
   const [settings, setSettings] = useState<TerminalSettings>(() => {
     try {
       const saved = localStorage.getItem('xauusd_terminal_settings');
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return {
+          ...DEFAULT_SETTINGS,
+          ...parsed,
+          userApiKeys: { ...DEFAULT_SETTINGS.userApiKeys, ...(parsed.userApiKeys || {}) },
+        };
+      }
     } catch {
       // ignore
     }
-    return {
-      defaultSymbol: 'OANDA:XAUUSD',
-      defaultTimeframe: '5m',
-      timezone: 'Asia/Kolkata',
-      theme: 'dark',
-      soundAlerts: true,
-      browserNotifications: false,
-      newsFilterThreshold: 'MEDIUM',
-      userApiKeys: {},
-    };
+    return DEFAULT_SETTINGS;
   });
 
-  const [currentTimeframe, setCurrentTimeframe] = useState<Timeframe>(settings.defaultTimeframe);
-  const [profileRange, setProfileRange] = useState<'SESSION' | 'DAY' | 'CUSTOM'>('SESSION');
-  const [correlationWindow, setCorrelationWindow] = useState<number>(20);
+  const [currentTimeframe, setCurrentTimeframe] = useState<Timeframe>(() => {
+    try {
+      const saved = localStorage.getItem('xauusd_terminal_timeframe');
+      if (saved) return saved as Timeframe;
+    } catch {
+      // ignore
+    }
+    return settings.defaultTimeframe;
+  });
+
+  const [profileRange, setProfileRange] = useState<'SESSION' | 'DAY' | 'CUSTOM'>(() => {
+    try {
+      const saved = localStorage.getItem('xauusd_terminal_profile_range');
+      if (saved === 'SESSION' || saved === 'DAY' || saved === 'CUSTOM') return saved;
+    } catch {
+      // ignore
+    }
+    return 'SESSION';
+  });
+
+  const [correlationWindow, setCorrelationWindow] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('xauusd_terminal_correlation_window');
+      if (saved) return Number(saved) || 20;
+    } catch {
+      // ignore
+    }
+    return 20;
+  });
+
   const [mobileTab, setMobileTab] = useState<MobileTab>('OVERVIEW');
+
+  const handleSelectTimeframe = (tf: Timeframe) => {
+    setCurrentTimeframe(tf);
+    try {
+      localStorage.setItem('xauusd_terminal_timeframe', tf);
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleSelectProfileRange = (range: 'SESSION' | 'DAY' | 'CUSTOM') => {
+    setProfileRange(range);
+    try {
+      localStorage.setItem('xauusd_terminal_profile_range', range);
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleSelectCorrelationWindow = (win: number) => {
+    setCorrelationWindow(win);
+    try {
+      localStorage.setItem('xauusd_terminal_correlation_window', String(win));
+    } catch {
+      // ignore
+    }
+  };
 
   // --- MODAL STATES ---
   const [isDiagnosticsOpen, setIsDiagnosticsOpen] = useState(false);
@@ -361,7 +426,7 @@ export const App: React.FC = () => {
         regime={regime}
         volatility={volatility}
         currentTimeframe={currentTimeframe}
-        onSelectTimeframe={setCurrentTimeframe}
+        onSelectTimeframe={handleSelectTimeframe}
       />
 
       {/* 3. Main Terminal Content Grid */}
@@ -395,14 +460,14 @@ export const App: React.FC = () => {
               orderFlow={orderFlow}
               currentPrice={quote?.price || 0}
               profileRange={profileRange}
-              onChangeProfileRange={setProfileRange}
+              onChangeProfileRange={handleSelectProfileRange}
             />
 
             <MacroPanel
               macro={macro}
               correlations={correlations}
               selectedWindow={correlationWindow}
-              onSelectWindow={setCorrelationWindow}
+              onSelectWindow={handleSelectCorrelationWindow}
             />
           </div>
         </div>
@@ -413,7 +478,7 @@ export const App: React.FC = () => {
             macro={macro}
             correlations={correlations}
             selectedWindow={correlationWindow}
-            onSelectWindow={setCorrelationWindow}
+            onSelectWindow={handleSelectCorrelationWindow}
           />
         </div>
 

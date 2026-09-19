@@ -33,11 +33,72 @@ export const ChartSection: React.FC<ChartSectionProps> = ({
   structure,
   quote,
 }) => {
-  const [chartMode, setChartMode] = useState<'TRADINGVIEW' | 'TERMINAL_ANALYTICS'>('TRADINGVIEW');
-  const [showLiquidity, setShowLiquidity] = useState(true);
-  const [showProfile, setShowProfile] = useState(true);
-  const [showZones, setShowZones] = useState(true);
-  const [showStructure, setShowStructure] = useState(true);
+  const [chartMode, setChartMode] = useState<'TRADINGVIEW' | 'TERMINAL_ANALYTICS'>(() => {
+    try {
+      const saved = localStorage.getItem('xauusd_terminal_chart_mode');
+      if (saved === 'TRADINGVIEW' || saved === 'TERMINAL_ANALYTICS') return saved;
+    } catch {}
+    return 'TRADINGVIEW';
+  });
+
+  const [showLiquidity, setShowLiquidity] = useState(() => {
+    try {
+      const saved = localStorage.getItem('xauusd_overlay_liquidity');
+      if (saved !== null) return saved === 'true';
+    } catch {}
+    return true;
+  });
+
+  const [showProfile, setShowProfile] = useState(() => {
+    try {
+      const saved = localStorage.getItem('xauusd_overlay_profile');
+      if (saved !== null) return saved === 'true';
+    } catch {}
+    return true;
+  });
+
+  const [showZones, setShowZones] = useState(() => {
+    try {
+      const saved = localStorage.getItem('xauusd_overlay_zones');
+      if (saved !== null) return saved === 'true';
+    } catch {}
+    return true;
+  });
+
+  const [showStructure, setShowStructure] = useState(() => {
+    try {
+      const saved = localStorage.getItem('xauusd_overlay_structure');
+      if (saved !== null) return saved === 'true';
+    } catch {}
+    return true;
+  });
+
+  const handleSetChartMode = (mode: 'TRADINGVIEW' | 'TERMINAL_ANALYTICS') => {
+    setChartMode(mode);
+    try {
+      localStorage.setItem('xauusd_terminal_chart_mode', mode);
+    } catch {}
+  };
+
+  const handleToggleLiquidity = (val: boolean) => {
+    setShowLiquidity(val);
+    try { localStorage.setItem('xauusd_overlay_liquidity', String(val)); } catch {}
+  };
+
+  const handleToggleProfile = (val: boolean) => {
+    setShowProfile(val);
+    try { localStorage.setItem('xauusd_overlay_profile', String(val)); } catch {}
+  };
+
+  const handleToggleZones = (val: boolean) => {
+    setShowZones(val);
+    try { localStorage.setItem('xauusd_overlay_zones', String(val)); } catch {}
+  };
+
+  const handleToggleStructure = (val: boolean) => {
+    setShowStructure(val);
+    try { localStorage.setItem('xauusd_overlay_structure', String(val)); } catch {}
+  };
 
   const chartContainerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -55,18 +116,8 @@ export const ChartSection: React.FC<ChartSectionProps> = ({
   };
   const tvInterval = tvIntervalMap[timeframe] || '5';
 
-  // Initialize and update Lightweight Charts in TERMINAL_ANALYTICS mode
+  // Initialize and update Lightweight Charts
   useEffect(() => {
-    if (chartMode !== 'TERMINAL_ANALYTICS') {
-      if (chartRef.current) {
-        chartRef.current.remove();
-        chartRef.current = null;
-        seriesRef.current = null;
-        priceLinesRef.current = [];
-      }
-      return;
-    }
-
     const container = chartContainerRef.current;
     if (!container) return;
 
@@ -142,6 +193,14 @@ export const ChartSection: React.FC<ChartSectionProps> = ({
         seriesRef.current = null;
         priceLinesRef.current = [];
       };
+    } else if (chartMode === 'TERMINAL_ANALYTICS') {
+      // When switching into TERMINAL_ANALYTICS mode, fit content and resize
+      setTimeout(() => {
+        if (container && chartRef.current) {
+          chartRef.current.applyOptions({ width: container.clientWidth });
+          chartRef.current.timeScale().fitContent();
+        }
+      }, 50);
     }
   }, [chartMode]);
 
@@ -312,7 +371,7 @@ export const ChartSection: React.FC<ChartSectionProps> = ({
           {/* Chart Mode Toggle */}
           <div className="bg-[#151a24] p-0.5 rounded border border-[#232b3c] flex items-center">
             <button
-              onClick={() => setChartMode('TRADINGVIEW')}
+              onClick={() => handleSetChartMode('TRADINGVIEW')}
               className={`px-2.5 py-0.5 rounded text-[11px] font-mono font-semibold transition-colors ${
                 chartMode === 'TRADINGVIEW'
                   ? 'bg-blue-600 text-white'
@@ -322,7 +381,7 @@ export const ChartSection: React.FC<ChartSectionProps> = ({
               TradingView Official
             </button>
             <button
-              onClick={() => setChartMode('TERMINAL_ANALYTICS')}
+              onClick={() => handleSetChartMode('TERMINAL_ANALYTICS')}
               className={`px-2.5 py-0.5 rounded text-[11px] font-mono font-semibold transition-colors flex items-center gap-1 ${
                 chartMode === 'TERMINAL_ANALYTICS'
                   ? 'bg-blue-600 text-white'
@@ -387,7 +446,7 @@ export const ChartSection: React.FC<ChartSectionProps> = ({
             <input
               type="checkbox"
               checked={showLiquidity}
-              onChange={e => setShowLiquidity(e.target.checked)}
+              onChange={e => handleToggleLiquidity(e.target.checked)}
               className="accent-emerald-500 rounded"
             />
             <span>Liquidity Levels</span>
@@ -396,7 +455,7 @@ export const ChartSection: React.FC<ChartSectionProps> = ({
             <input
               type="checkbox"
               checked={showProfile}
-              onChange={e => setShowProfile(e.target.checked)}
+              onChange={e => handleToggleProfile(e.target.checked)}
               className="accent-amber-500 rounded"
             />
             <span>Volume Profile (POC/VAH/VAL)</span>
@@ -405,7 +464,7 @@ export const ChartSection: React.FC<ChartSectionProps> = ({
             <input
               type="checkbox"
               checked={showZones}
-              onChange={e => setShowZones(e.target.checked)}
+              onChange={e => handleToggleZones(e.target.checked)}
               className="accent-blue-500 rounded"
             />
             <span>Reaction Zones</span>
@@ -414,7 +473,7 @@ export const ChartSection: React.FC<ChartSectionProps> = ({
             <input
               type="checkbox"
               checked={showStructure}
-              onChange={e => setShowStructure(e.target.checked)}
+              onChange={e => handleToggleStructure(e.target.checked)}
               className="accent-cyan-500 rounded"
             />
             <span>BOS / CHOCH</span>
@@ -422,18 +481,21 @@ export const ChartSection: React.FC<ChartSectionProps> = ({
         </div>
       )}
 
-      {/* Chart Canvas or TradingView Embed */}
+      {/* Chart Canvas & TradingView Embed (Both persistent in DOM for instantaneous switching) */}
       <div className="relative w-full bg-[#0a0d14] min-h-[440px] sm:min-h-[480px]">
-        {chartMode === 'TRADINGVIEW' ? (
+        <div className={chartMode === 'TRADINGVIEW' ? 'w-full h-[440px] sm:h-[500px]' : 'hidden'}>
           <iframe
             title="TradingView OANDA XAUUSD"
             src={`https://s.tradingview.com/widgetembed/?frameElementId=tradingview_widget&symbol=OANDA%3AXAUUSD&interval=${tvInterval}&theme=dark&style=1&locale=en&enable_publishing=false&hide_top_toolbar=false&hide_legend=false&save_image=false`}
-            className="w-full h-[440px] sm:h-[500px] border-0"
+            className="w-full h-full border-0"
+            loading="eager"
             allowFullScreen
           />
-        ) : (
-          <div ref={chartContainerRef} className="w-full h-[440px] sm:h-[480px]" />
-        )}
+        </div>
+        <div
+          ref={chartContainerRef}
+          className={chartMode === 'TERMINAL_ANALYTICS' ? 'w-full h-[440px] sm:h-[480px]' : 'hidden'}
+        />
       </div>
 
       {/* Chart Footer Note */}

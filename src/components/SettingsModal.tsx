@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Bell, Key, Save, Send, Settings, ShieldCheck, X } from 'lucide-react';
 import { TerminalSettings, Timeframe } from '../types/market';
 
@@ -15,8 +15,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onSave,
   onClose,
 }) => {
-  const [formData, setFormData] = useState<TerminalSettings>({ ...settings });
+  const [formData, setFormData] = useState<TerminalSettings>(() => ({
+    ...settings,
+    userApiKeys: { ...(settings.userApiKeys || {}) },
+  }));
   const [telegramStatus, setTelegramStatus] = useState<string | null>(null);
+
+  // Sync formData whenever modal opens or settings update
+  useEffect(() => {
+    if (isOpen) {
+      setFormData({
+        ...settings,
+        userApiKeys: { ...(settings.userApiKeys || {}) },
+      });
+      setTelegramStatus(null);
+    }
+  }, [isOpen, settings]);
 
   if (!isOpen) return null;
 
@@ -35,7 +49,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     if ('Notification' in window) {
       const perm = await Notification.requestPermission();
       if (perm === 'granted') {
-        setFormData(prev => ({ ...prev, browserNotifications: true }));
+        const updated = { ...formData, browserNotifications: true };
+        setFormData(updated);
+        onSave(updated);
         new Notification('Gold Intelligence Terminal', {
           body: 'Browser notifications successfully enabled.',
         });
@@ -56,14 +72,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           chat_id: formData.telegramChatId,
-          text: '🔔 *Gold Intelligence Terminal Test Message*\n\nTelegram alert dispatcher is connected and operational.',
+          text: '🔔 *Gold Intelligence Terminal Test Message*\n\nTelegram alert dispatcher is connected, verified, and operational.',
           parse_mode: 'Markdown',
         }),
       });
 
       const data = await res.json();
       if (data.ok) {
-        setTelegramStatus('✅ Test message delivered successfully!');
+        setTelegramStatus('✅ Verified & saved! Test message delivered successfully.');
+        // Auto-save verified Telegram settings so changes are immediately persisted
+        onSave(formData);
       } else {
         setTelegramStatus(`❌ Delivery failed: ${data.description || 'Unknown error'}`);
       }
@@ -243,11 +261,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <input
                 type="password"
                 placeholder="Optional FRED API Key"
-                value={formData.userApiKeys.fredApiKey || ''}
+                value={formData.userApiKeys?.fredApiKey || ''}
                 onChange={e =>
                   setFormData({
                     ...formData,
-                    userApiKeys: { ...formData.userApiKeys, fredApiKey: e.target.value },
+                    userApiKeys: { ...(formData.userApiKeys || {}), fredApiKey: e.target.value },
                   })
                 }
                 className="w-full bg-[#0b0e14] border border-[#222a3a] rounded px-2.5 py-1.5 text-zinc-200 focus:outline-none focus:border-amber-500"

@@ -211,7 +211,64 @@ class MarketDataProvider {
       }
     }
 
-    const intervalMap: Record<Timeframe, string> = {
+    const yIntervalMap: Record<Timeframe, { interval: string; range: string }> = {
+      '1m': { interval: '1m', range: '1d' },
+      '5m': { interval: '5m', range: '1d' },
+      '15m': { interval: '15m', range: '5d' },
+      '1H': { interval: '60m', range: '1mo' },
+      '4H': { interval: '60m', range: '3mo' },
+      '1D': { interval: '1d', range: '6mo' },
+    };
+
+    const { interval: yInt, range: yRng } = yIntervalMap[timeframe] || { interval: '5m', range: '1d' };
+
+    // 1. Primary: Yahoo Finance COMEX Gold Futures (GC=F) - matches real institutional market session
+    try {
+      const yRes = await fetch(`/api/yahoo/v8/finance/chart/GC=F?interval=${yInt}&range=${yRng}`)
+        .catch(() => fetch(`https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=${yInt}&range=${yRng}`));
+
+      if (yRes.ok) {
+        const yData = await yRes.json();
+        const result = yData.chart?.result?.[0];
+        if (result && result.timestamp && result.indicators?.quote?.[0]) {
+          const timestamps = result.timestamp;
+          const quotes = result.indicators.quote[0];
+
+          const rawCandles: Candle[] = [];
+          for (let i = 0; i < timestamps.length; i++) {
+            const o = quotes.open?.[i];
+            const h = quotes.high?.[i];
+            const l = quotes.low?.[i];
+            const c = quotes.close?.[i];
+            const v = quotes.volume?.[i] || 0;
+            if (o !== null && h !== null && l !== null && c !== null && !isNaN(o) && !isNaN(c)) {
+              rawCandles.push({
+                time: timestamps[i],
+                open: parseFloat(o.toFixed(2)),
+                high: parseFloat(h.toFixed(2)),
+                low: parseFloat(l.toFixed(2)),
+                close: parseFloat(c.toFixed(2)),
+                volume: v,
+                buyVolume: v * 0.5,
+                sellVolume: v * 0.5,
+              });
+            }
+          }
+
+          if (rawCandles.length > 5) {
+            const sliced = rawCandles.slice(-limit);
+            const calibrated = this.calibrateCandlesToSpot(sliced, currentQuote);
+            this.candleCache.set(cacheKey, { candles: calibrated, timestamp: now });
+            return calibrated;
+          }
+        }
+      }
+    } catch (yErr) {
+      console.warn('Yahoo GC=F candle fetch failed, trying Binance XAUT/PAXG fallback:', yErr);
+    }
+
+    // 2. Secondary Fallback: Binance XAUTUSDT (Tether Gold - tracks full gold volatility)
+    const binanceIntervalMap: Record<Timeframe, string> = {
       '1m': '1m',
       '5m': '5m',
       '15m': '15m',
@@ -219,97 +276,88 @@ class MarketDataProvider {
       '4H': '4h',
       '1D': '1d',
     };
-    const interval = intervalMap[timeframe] || '5m';
+    const bInterval = binanceIntervalMap[timeframe] || '5m';
 
     try {
-      const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=${interval}&limit=${limit}`);
-      if (!res.ok) throw new Error(`Binance klines error: ${res.status}`);
+      const bRes = await fetch(`https://api.binance.com/api/v3/klines?symbol=XAUTUSDT&interval=${bInterval}&limit=${limit}`);
+      if (bRes.ok) {
+        const bData = await bRes.json();
+        if (Array.isArray(bData) && bData.length > 5) {
+          const rawCandles: Candle[] = bData.map((item: (string | number)[]) => {
+            const time = Math.floor(Number(item[0]) / 1000);
+            const open = parseFloat(String(item[1]));
+            const high = parseFloat(String(item[2]));
+            const low = parseFloat(String(item[3]));
+            const close = parseFloat(String(item[4]));
+            const volume = parseFloat(String(item[5]));
+            const buyVolume = parseFloat(String(item[9]));
+            const sellVolume = Math.max(0, volume - buyVolume);
 
-      const data = await res.json();
-      if (!Array.isArray(data)) throw new Error('Invalid klines response format');
+            return {
+              time,
+              open,
+              high,
+              low,
+              close,
+              volume,
+              buyVolume,
+              sellVolume,
+            };
+          });
 
-      const rawCandles: Candle[] = data.map((item: (string | number)[]) => {
-        const time = Math.floor(Number(item[0]) / 1000);
-        const open = parseFloat(String(item[1]));
-        const high = parseFloat(String(item[2]));
-        const low = parseFloat(String(item[3]));
-        const close = parseFloat(String(item[4]));
-        const volume = parseFloat(String(item[5]));
-        const buyVolume = parseFloat(String(item[9]));
-        const sellVolume = Math.max(0, volume - buyVolume);
-
-        return {
-          time,
-          open,
-          high,
-          low,
-          close,
-          volume,
-          buyVolume,
-          sellVolume,
-        };
-      });
-
-      // Calibrate candle prices so the series aligns 1:1 with OANDA:XAUUSD
-      const calibratedCandles = this.calibrateCandlesToSpot(rawCandles, currentQuote);
-
-      this.candleCache.set(cacheKey, { candles: calibratedCandles, timestamp: now });
-      return calibratedCandles;
-    } catch (err) {
-      console.warn('Binance klines failed, attempting Yahoo Finance fallback:', err);
-      try {
-        const yIntervalMap: Record<Timeframe, { interval: string; range: string }> = {
-          '1m': { interval: '1m', range: '1d' },
-          '5m': { interval: '5m', range: '5d' },
-          '15m': { interval: '15m', range: '5d' },
-          '1H': { interval: '60m', range: '1mo' },
-          '4H': { interval: '60m', range: '3mo' },
-          '1D': { interval: '1d', range: '6mo' },
-        };
-
-        const { interval: yInt, range: yRng } = yIntervalMap[timeframe] || { interval: '5m', range: '5d' };
-        const yRes = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=${yInt}&range=${yRng}`);
-        const yData = await yRes.json();
-        const result = yData.chart?.result?.[0];
-        if (!result || !result.timestamp) throw new Error('No Yahoo candle data');
-
-        const timestamps = result.timestamp;
-        const quotes = result.indicators?.quote?.[0];
-
-        const rawCandles: Candle[] = [];
-        for (let i = 0; i < timestamps.length; i++) {
-          const o = quotes.open?.[i];
-          const h = quotes.high?.[i];
-          const l = quotes.low?.[i];
-          const c = quotes.close?.[i];
-          const v = quotes.volume?.[i] || 0;
-          if (o !== null && h !== null && l !== null && c !== null && !isNaN(o) && !isNaN(c)) {
-            rawCandles.push({
-              time: timestamps[i],
-              open: parseFloat(o.toFixed(2)),
-              high: parseFloat(h.toFixed(2)),
-              low: parseFloat(l.toFixed(2)),
-              close: parseFloat(c.toFixed(2)),
-              volume: v,
-              buyVolume: v * 0.5,
-              sellVolume: v * 0.5,
-            });
-          }
+          const calibrated = this.calibrateCandlesToSpot(rawCandles, currentQuote);
+          this.candleCache.set(cacheKey, { candles: calibrated, timestamp: now });
+          return calibrated;
         }
-
-        const sliced = rawCandles.slice(-limit);
-        const calibrated = this.calibrateCandlesToSpot(sliced, currentQuote);
-        this.candleCache.set(cacheKey, { candles: calibrated, timestamp: now });
-        return calibrated;
-      } catch (fallbackErr) {
-        if (cached) return cached.candles;
-        throw fallbackErr;
       }
+    } catch {
+      // Continue to tertiary fallback
     }
+
+    // 3. Tertiary Fallback: Binance PAXGUSDT
+    try {
+      const pRes = await fetch(`https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=${bInterval}&limit=${limit}`);
+      if (pRes.ok) {
+        const pData = await pRes.json();
+        if (Array.isArray(pData) && pData.length > 0) {
+          const rawCandles: Candle[] = pData.map((item: (string | number)[]) => {
+            const time = Math.floor(Number(item[0]) / 1000);
+            const open = parseFloat(String(item[1]));
+            const high = parseFloat(String(item[2]));
+            const low = parseFloat(String(item[3]));
+            const close = parseFloat(String(item[4]));
+            const volume = parseFloat(String(item[5]));
+            const buyVolume = parseFloat(String(item[9]));
+            const sellVolume = Math.max(0, volume - buyVolume);
+
+            return {
+              time,
+              open,
+              high,
+              low,
+              close,
+              volume,
+              buyVolume,
+              sellVolume,
+            };
+          });
+
+          const calibrated = this.calibrateCandlesToSpot(rawCandles, currentQuote);
+          this.candleCache.set(cacheKey, { candles: calibrated, timestamp: now });
+          return calibrated;
+        }
+      }
+    } catch (fallbackErr) {
+      if (cached) return cached.candles;
+      throw fallbackErr;
+    }
+
+    if (cached) return cached.candles;
+    throw new Error('All candle data providers failed');
   }
 
   /**
-   * Calibrates raw candles (from Binance PAXG or CME GC=F) to match OANDA:XAUUSD spot price levels
+   * Calibrates raw candles (from CME GC=F or Binance) to match OANDA:XAUUSD spot price levels and range
    */
   private calibrateCandlesToSpot(candles: Candle[], quote: MarketQuote | null): Candle[] {
     if (!candles || candles.length === 0 || !quote || quote.price <= 0) {
@@ -317,15 +365,15 @@ class MarketDataProvider {
     }
 
     const lastCandle = candles[candles.length - 1];
-    const offset = quote.price - lastCandle.close;
+    const basis = lastCandle.close - quote.price;
 
-    // Apply offset so the current candle matches the exact OANDA:XAUUSD price
+    // Shift candles by the basis difference so the final close aligns exactly with live spot price
     const calibrated = candles.map((c, idx) => {
       const isLast = idx === candles.length - 1;
-      const cOpen = parseFloat((c.open + offset).toFixed(2));
-      const cHigh = parseFloat((c.high + offset).toFixed(2));
-      const cLow = parseFloat((c.low + offset).toFixed(2));
-      const cClose = isLast ? quote.price : parseFloat((c.close + offset).toFixed(2));
+      const cOpen = parseFloat((c.open - basis).toFixed(2));
+      const cHigh = parseFloat((c.high - basis).toFixed(2));
+      const cLow = parseFloat((c.low - basis).toFixed(2));
+      const cClose = isLast ? quote.price : parseFloat((c.close - basis).toFixed(2));
 
       return {
         ...c,
