@@ -201,73 +201,32 @@ class MarketDataProvider {
       return cached.candles;
     }
 
-    // Ensure we have a current quote for price alignment
-    let currentQuote = this.lastQuote;
-    if (!currentQuote || now - this.quoteCacheTime > 5000) {
-      try {
-        currentQuote = await this.getQuote();
-      } catch {
-        // ignore
-      }
-    }
-
-    const yIntervalMap: Record<Timeframe, { interval: string; range: string }> = {
-      '1m': { interval: '1m', range: '1d' },
-      '5m': { interval: '5m', range: '1d' },
-      '15m': { interval: '15m', range: '5d' },
-      '1H': { interval: '60m', range: '1mo' },
-      '4H': { interval: '60m', range: '3mo' },
-      '1D': { interval: '1d', range: '6mo' },
-    };
-
-    const { interval: yInt, range: yRng } = yIntervalMap[timeframe] || { interval: '5m', range: '1d' };
-
-    // 1. Primary: Yahoo Finance COMEX Gold Futures (GC=F) - matches real institutional market session
+    // 1. Primary: Cloudflare Worker Endpoint /api/candles/xauusd (Exact TradingView OANDA:XAUUSD Feed)
     try {
-      const yRes = await fetch(`/api/yahoo/v8/finance/chart/GC=F?interval=${yInt}&range=${yRng}`)
-        .catch(() => fetch(`https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=${yInt}&range=${yRng}`));
-
-      if (yRes.ok) {
-        const yData = await yRes.json();
-        const result = yData.chart?.result?.[0];
-        if (result && result.timestamp && result.indicators?.quote?.[0]) {
-          const timestamps = result.timestamp;
-          const quotes = result.indicators.quote[0];
-
-          const rawCandles: Candle[] = [];
-          for (let i = 0; i < timestamps.length; i++) {
-            const o = quotes.open?.[i];
-            const h = quotes.high?.[i];
-            const l = quotes.low?.[i];
-            const c = quotes.close?.[i];
-            const v = quotes.volume?.[i] || 0;
-            if (o !== null && h !== null && l !== null && c !== null && !isNaN(o) && !isNaN(c)) {
-              rawCandles.push({
-                time: timestamps[i],
-                open: parseFloat(o.toFixed(2)),
-                high: parseFloat(h.toFixed(2)),
-                low: parseFloat(l.toFixed(2)),
-                close: parseFloat(c.toFixed(2)),
-                volume: v,
-                buyVolume: v * 0.5,
-                sellVolume: v * 0.5,
-              });
-            }
-          }
-
-          if (rawCandles.length > 5) {
-            const sliced = rawCandles.slice(-limit);
-            const calibrated = this.calibrateCandlesToSpot(sliced, currentQuote);
-            this.candleCache.set(cacheKey, { candles: calibrated, timestamp: now });
-            return calibrated;
-          }
+      const res = await fetch(`/api/candles/xauusd?timeframe=${timeframe}&limit=${limit}`);
+      if (res.ok) {
+        const candles: Candle[] = await res.json();
+        if (Array.isArray(candles) && candles.length > 5) {
+          this.candleCache.set(cacheKey, { candles, timestamp: now });
+          return candles;
         }
       }
-    } catch (yErr) {
-      console.warn('Yahoo GC=F candle fetch failed, trying Binance XAUT/PAXG fallback:', yErr);
+    } catch {
+      // Continue to secondary TradingView WebSocket
     }
 
-    // 2. Secondary Fallback: Binance XAUTUSDT (Tether Gold - tracks full gold volatility)
+    // 2. Secondary: Direct Browser WebSocket to TradingView (Real-time OANDA:XAUUSD Bars)
+    try {
+      const tvWsCandles = await this.fetchTradingViewWebSocketCandles(timeframe, limit);
+      if (Array.isArray(tvWsCandles) && tvWsCandles.length > 5) {
+        this.candleCache.set(cacheKey, { candles: tvWsCandles, timestamp: now });
+        return tvWsCandles;
+      }
+    } catch {
+      // Continue to tertiary fallback
+    }
+
+    // 3. Tertiary Fallback: Binance XAUTUSDT (Tether Gold - pure spot gold tracking)
     const binanceIntervalMap: Record<Timeframe, string> = {
       '1m': '1m',
       '5m': '5m',
@@ -285,12 +244,12 @@ class MarketDataProvider {
         if (Array.isArray(bData) && bData.length > 5) {
           const rawCandles: Candle[] = bData.map((item: (string | number)[]) => {
             const time = Math.floor(Number(item[0]) / 1000);
-            const open = parseFloat(String(item[1]));
-            const high = parseFloat(String(item[2]));
-            const low = parseFloat(String(item[3]));
-            const close = parseFloat(String(item[4]));
-            const volume = parseFloat(String(item[5]));
-            const buyVolume = parseFloat(String(item[9]));
+            const open = parseFloat(Number(item[1]).toFixed(2));
+            const high = parseFloat(Number(item[2]).toFixed(2));
+            const low = parseFloat(Number(item[3]).toFixed(2));
+            const close = parseFloat(Number(item[4]).toFixed(2));
+            const volume = parseFloat(Number(item[5]).toFixed(2));
+            const buyVolume = parseFloat(Number(item[9]).toFixed(2));
             const sellVolume = Math.max(0, volume - buyVolume);
 
             return {
@@ -305,46 +264,8 @@ class MarketDataProvider {
             };
           });
 
-          const calibrated = this.calibrateCandlesToSpot(rawCandles, currentQuote);
-          this.candleCache.set(cacheKey, { candles: calibrated, timestamp: now });
-          return calibrated;
-        }
-      }
-    } catch {
-      // Continue to tertiary fallback
-    }
-
-    // 3. Tertiary Fallback: Binance PAXGUSDT
-    try {
-      const pRes = await fetch(`https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=${bInterval}&limit=${limit}`);
-      if (pRes.ok) {
-        const pData = await pRes.json();
-        if (Array.isArray(pData) && pData.length > 0) {
-          const rawCandles: Candle[] = pData.map((item: (string | number)[]) => {
-            const time = Math.floor(Number(item[0]) / 1000);
-            const open = parseFloat(String(item[1]));
-            const high = parseFloat(String(item[2]));
-            const low = parseFloat(String(item[3]));
-            const close = parseFloat(String(item[4]));
-            const volume = parseFloat(String(item[5]));
-            const buyVolume = parseFloat(String(item[9]));
-            const sellVolume = Math.max(0, volume - buyVolume);
-
-            return {
-              time,
-              open,
-              high,
-              low,
-              close,
-              volume,
-              buyVolume,
-              sellVolume,
-            };
-          });
-
-          const calibrated = this.calibrateCandlesToSpot(rawCandles, currentQuote);
-          this.candleCache.set(cacheKey, { candles: calibrated, timestamp: now });
-          return calibrated;
+          this.candleCache.set(cacheKey, { candles: rawCandles, timestamp: now });
+          return rawCandles;
         }
       }
     } catch (fallbackErr) {
@@ -354,6 +275,112 @@ class MarketDataProvider {
 
     if (cached) return cached.candles;
     throw new Error('All candle data providers failed');
+  }
+
+  /**
+   * Direct high-speed WebSocket connection to TradingView's live data engine.
+   * Pulls the exact historical OHLCV bars for OANDA:XAUUSD directly into the client.
+   */
+  private fetchTradingViewWebSocketCandles(timeframe: Timeframe, limit: number): Promise<Candle[]> {
+    const resolutionMap: Record<Timeframe, string> = {
+      '1m': '1',
+      '5m': '5',
+      '15m': '15',
+      '1H': '60',
+      '4H': '240',
+      '1D': '1D',
+    };
+    const resolution = resolutionMap[timeframe] || '5';
+    const nBars = Math.min(Math.max(limit, 30), 500);
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timeout = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          reject(new Error('Browser TradingView WebSocket timeout'));
+        }
+      }, 4000);
+
+      try {
+        if (typeof window === 'undefined' || !window.WebSocket) {
+          throw new Error('WebSocket not supported in this environment');
+        }
+
+        const ws = new WebSocket('wss://data.tradingview.com/socket.io/websocket');
+        const session = 'cs_' + Math.random().toString(36).substring(2, 10);
+
+        const send = (msg: any) => {
+          const json = JSON.stringify(msg);
+          ws.send('~m~' + json.length + '~m~' + json);
+        };
+
+        ws.onopen = () => {
+          send({ m: 'set_auth_token', p: ['unauthorized_user_token'] });
+          send({ m: 'chart_create_session', p: [session, ''] });
+          send({ m: 'resolve_symbol', p: [session, 'sds_sym_1', JSON.stringify({ symbol: 'OANDA:XAUUSD', adjustment: 'splits' })] });
+          send({ m: 'create_series', p: [session, 'sds_1', 's1', 'sds_sym_1', resolution, nBars, ''] });
+        };
+
+        ws.onmessage = (e: MessageEvent) => {
+          const raw = typeof e.data === 'string' ? e.data : '';
+          if (raw.includes('~h~')) {
+            ws.send('~m~' + raw.length + '~m~' + raw);
+            return;
+          }
+          const msgs = raw.split(/~m~\d+~m~/).filter(Boolean);
+          for (const m of msgs) {
+            try {
+              const obj = JSON.parse(m);
+              if (obj.m === 'timescale_update') {
+                const bars = obj.p?.[1]?.sds_1?.s;
+                if (Array.isArray(bars) && bars.length > 0) {
+                  if (!settled) {
+                    settled = true;
+                    clearTimeout(timeout);
+                    try { ws.close(); } catch {}
+                    const formatted: Candle[] = bars.map((b: any) => {
+                      const v = b.v;
+                      const time = v[0];
+                      const open = parseFloat(Number(v[1]).toFixed(2));
+                      const high = parseFloat(Number(v[2]).toFixed(2));
+                      const low = parseFloat(Number(v[3]).toFixed(2));
+                      const close = parseFloat(Number(v[4]).toFixed(2));
+                      const volume = parseFloat(Number(v[5]).toFixed(2)) || 0;
+                      return {
+                        time,
+                        open,
+                        high,
+                        low,
+                        close,
+                        volume,
+                        buyVolume: Math.round(volume * 0.52),
+                        sellVolume: Math.round(volume * 0.48),
+                      };
+                    });
+                    resolve(formatted);
+                  }
+                }
+              }
+            } catch {}
+          }
+        };
+
+        ws.onerror = (err) => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timeout);
+            reject(err);
+          }
+        };
+      } catch (err) {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timeout);
+          reject(err);
+        }
+      }
+    });
   }
 
   /**

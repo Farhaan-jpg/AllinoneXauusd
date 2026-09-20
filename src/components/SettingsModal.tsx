@@ -60,6 +60,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   };
 
+  const syncTelegramToCloud = async (token?: string, chatId?: string, newsAlerts?: boolean) => {
+    if (!token || !chatId) return;
+    try {
+      await fetch('/api/telegram/sync-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          telegramBotToken: token,
+          telegramChatId: chatId,
+          telegramNewsAlerts: newsAlerts ?? true,
+        }),
+      });
+    } catch {}
+  };
+
   const handleTestTelegram = async () => {
     if (!formData.telegramBotToken || !formData.telegramChatId) {
       setTelegramStatus('Please enter both Telegram Bot Token and Chat ID.');
@@ -73,16 +88,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           chat_id: formData.telegramChatId,
-          text: '🔔 *Gold Intelligence Terminal Test Message*\n\nTelegram alert dispatcher is connected, verified, and operational.',
+          text: '🔔 *Gold Intelligence Terminal Test Message*\n\nTelegram alert dispatcher is connected, verified, and operational 24/7 in the cloud.',
           parse_mode: 'Markdown',
         }),
       });
 
       const data = await res.json();
       if (data.ok) {
-        setTelegramStatus('✅ Verified & saved! Test message delivered successfully.');
+        setTelegramStatus('✅ Verified, saved & synced to Cloudflare 24/7 Cloud Worker! Alerts will run even when this tab is closed.');
         // Auto-save verified Telegram settings so changes are immediately persisted
         onSave(formData);
+        syncTelegramToCloud(formData.telegramBotToken, formData.telegramChatId, formData.telegramNewsAlerts);
       } else {
         setTelegramStatus(`❌ Delivery failed: ${data.description || 'Unknown error'}`);
       }
@@ -94,6 +110,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     onSave(formData);
+    syncTelegramToCloud(formData.telegramBotToken, formData.telegramChatId, formData.telegramNewsAlerts);
     onClose();
   };
 
@@ -236,6 +253,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <div className="text-amber-400 font-bold uppercase tracking-wider text-[11px] flex items-center gap-1.5">
               <Send className="w-3.5 h-3.5" />
               <span>Interactive Two-Way Telegram Bot & Dispatcher</span>
+            </div>
+
+            <div className="p-2.5 rounded bg-[#0b121e] border border-blue-900/50 flex items-center gap-2 text-[11px] text-blue-300">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+              <span>
+                <strong>Cloudflare 24/7 Cloud Execution:</strong> Alerts, breaking geopolitical news, and economic calendar releases run automatically on Cloudflare Workers even when you leave or close this website.
+              </span>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">

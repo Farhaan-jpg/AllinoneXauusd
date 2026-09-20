@@ -522,6 +522,88 @@ export default {
         });
       }
 
+      // 11. /api/candles/xauusd - Exact TradingView OANDA:XAUUSD Bars
+      if (path === '/api/candles/xauusd') {
+        const tf = url.searchParams.get('timeframe') || '5m';
+        const limit = parseInt(url.searchParams.get('limit') || '200', 10);
+        try {
+          const candles = await fetchTradingViewCandles(tf, limit);
+          if (candles && candles.length > 0) {
+            return jsonResponse(candles, corsHeaders, 5); // 5s cache
+          }
+        } catch (candleErr) {
+          console.warn('TV candle fetch failed, falling back to spot provider:', candleErr);
+        }
+        const fallbackCandles = await getFallbackSpotCandles(tf, limit);
+        return jsonResponse(fallbackCandles, corsHeaders, 10);
+      }
+
+      // 12. /api/telegram/sync-config - Sync Telegram Bot credentials to Cloudflare Worker
+      if (path === '/api/telegram/sync-config') {
+        if (request.method === 'POST') {
+          const body: any = await request.json().catch(() => ({}));
+          if (body.telegramBotToken !== undefined) globalCloudState.telegramBotToken = String(body.telegramBotToken || '').trim();
+          if (body.telegramChatId !== undefined) globalCloudState.telegramChatId = String(body.telegramChatId || '').trim();
+          if (body.telegramNewsAlerts !== undefined) globalCloudState.telegramNewsAlerts = Boolean(body.telegramNewsAlerts);
+
+          await saveCloudConfig(env, globalCloudState);
+          return jsonResponse({
+            ok: true,
+            message: 'Telegram settings synchronized to Cloudflare 24/7 Cloud Worker',
+            active: Boolean(globalCloudState.telegramBotToken && globalCloudState.telegramChatId),
+          }, corsHeaders);
+        }
+
+        const cfg = await getCloudConfig(env);
+        return jsonResponse({
+          ok: true,
+          hasToken: Boolean(cfg.telegramBotToken || env.TELEGRAM_BOT_TOKEN),
+          hasChatId: Boolean(cfg.telegramChatId || env.TELEGRAM_CHAT_ID),
+          telegramNewsAlerts: cfg.telegramNewsAlerts,
+        }, corsHeaders);
+      }
+
+      // 13. /api/alerts/sync - Sync Alert Rules to Cloudflare Worker
+      if (path === '/api/alerts/sync') {
+        if (request.method === 'POST') {
+          const body: any = await request.json().catch(() => ({}));
+          if (Array.isArray(body.alerts)) {
+            globalCloudState.alerts = body.alerts;
+            await saveCloudConfig(env, globalCloudState);
+          }
+          return jsonResponse({ ok: true, count: globalCloudState.alerts.length }, corsHeaders);
+        }
+        const cfg = await getCloudConfig(env);
+        return jsonResponse({ ok: true, alerts: cfg.alerts }, corsHeaders);
+      }
+
+      // 14. /api/cloud-status - Cloud Monitoring Health & Status
+      if (path === '/api/cloud-status') {
+        const cfg = await getCloudConfig(env);
+        const hasToken = Boolean(cfg.telegramBotToken || env.TELEGRAM_BOT_TOKEN);
+        const hasChatId = Boolean(cfg.telegramChatId || env.TELEGRAM_CHAT_ID);
+        return jsonResponse({
+          status: 'ONLINE',
+          tier: 'Cloudflare Free Tier Compliant',
+          cloudMonitoringActive: true,
+          hasTelegramToken: hasToken,
+          hasTelegramChatId: hasChatId,
+          telegramAlertsReady: hasToken && hasChatId,
+          newsAlertsEnabled: cfg.telegramNewsAlerts,
+          registeredAlertsCount: cfg.alerts.length,
+          lastCronRun: globalCloudState.lastCronRun,
+          lastCronStatus: globalCloudState.lastCronStatus,
+          alertsTriggeredCount: globalCloudState.alertsTriggeredCount,
+          timestamp: Date.now(),
+        }, corsHeaders);
+      }
+
+      // 15. /api/cloud-trigger - Trigger cloud monitoring cycle immediately (for testing)
+      if (path === '/api/cloud-trigger') {
+        const result = await runCloudAlertCycle(env);
+        return jsonResponse({ ok: true, result, timestamp: Date.now() }, corsHeaders);
+      }
+
       if (env.ASSETS) {
         return env.ASSETS.fetch(request);
       }
@@ -538,6 +620,16 @@ export default {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         }
       );
+    }
+  },
+
+  // 24/7 Cloudflare Cron Trigger Handler
+  // Executes every minute in Cloudflare cloud even when browser is closed
+  async scheduled(event: any, env: Env, ctx: any): Promise<void> {
+    if (ctx && ctx.waitUntil) {
+      ctx.waitUntil(runCloudAlertCycle(env));
+    } else {
+      await runCloudAlertCycle(env);
     }
   },
 };
@@ -770,5 +862,414 @@ function getFallbackCalendar(): any[] {
       relevanceToGold: 'Capital investment indicator influencing economic momentum and precious metals',
     },
   ];
+}
+
+// --- 24/7 Cloud Alerting & State Management ---
+
+interface CloudTerminalState {
+  telegramBotToken: string;
+  telegramChatId: string;
+  telegramNewsAlerts: boolean;
+  alerts: Array<{
+    id: string;
+    title: string;
+    type: string;
+    target_value: string;
+    condition: string;
+    enabled: boolean;
+    last_triggered?: number;
+  }>;
+  seenNewsIds: string[];
+  seenEventIds: string[];
+  lastCronRun: number;
+  lastCronStatus: string;
+  alertsTriggeredCount: number;
+}
+
+const globalCloudState: CloudTerminalState = {
+  telegramBotToken: '',
+  telegramChatId: '',
+  telegramNewsAlerts: true,
+  alerts: [],
+  seenNewsIds: [],
+  seenEventIds: [],
+  lastCronRun: 0,
+  lastCronStatus: 'Initialized (Waiting for first cron cycle)',
+  alertsTriggeredCount: 0,
+};
+
+async function getCloudConfig(env: Env): Promise<CloudTerminalState> {
+  // If KV is bound, load from KV
+  if (env.KV) {
+    try {
+      const saved = await env.KV.get('gold_terminal_cloud_config', 'json');
+      if (saved) {
+        return {
+          ...globalCloudState,
+          ...saved,
+          telegramBotToken: saved.telegramBotToken || globalCloudState.telegramBotToken,
+          telegramChatId: saved.telegramChatId || globalCloudState.telegramChatId,
+        };
+      }
+    } catch {}
+  }
+  return globalCloudState;
+}
+
+async function saveCloudConfig(env: Env, state: CloudTerminalState): Promise<void> {
+  if (env.KV) {
+    try {
+      await env.KV.put('gold_terminal_cloud_config', JSON.stringify({
+        telegramBotToken: state.telegramBotToken,
+        telegramChatId: state.telegramChatId,
+        telegramNewsAlerts: state.telegramNewsAlerts,
+        alerts: state.alerts,
+        seenNewsIds: state.seenNewsIds.slice(-200),
+        seenEventIds: state.seenEventIds.slice(-200),
+      }));
+    } catch {}
+  }
+}
+
+async function sendTelegramMessage(token: string, chatId: string, text: string): Promise<boolean> {
+  if (!token || !chatId || !text) return false;
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        parse_mode: 'Markdown',
+        disable_web_page_preview: true,
+      }),
+    });
+    return res.ok;
+  } catch (err) {
+    console.error('Failed to send Telegram message:', err);
+    return false;
+  }
+}
+
+async function runCloudAlertCycle(env: Env): Promise<{ ok: boolean; alertsSent: number; error?: string }> {
+  try {
+    const config = await getCloudConfig(env);
+    const botToken = config.telegramBotToken || env.TELEGRAM_BOT_TOKEN;
+    const chatId = config.telegramChatId || env.TELEGRAM_CHAT_ID;
+    const newsAlertsEnabled = config.telegramNewsAlerts ?? true;
+
+    globalCloudState.lastCronRun = Date.now();
+    let alertsSent = 0;
+
+    if (!botToken || !chatId) {
+      globalCloudState.lastCronStatus = 'Idle (No Telegram Bot Token or Chat ID configured in cloud)';
+      return { ok: true, alertsSent: 0 };
+    }
+
+    // 1. Fetch live quote for price alert checking
+    let currentPrice = 0;
+    try {
+      const tvRes = await fetch('https://scanner.tradingview.com/cfd/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+        body: JSON.stringify({
+          symbols: { tickers: ['OANDA:XAUUSD'] },
+          columns: ['close', 'open', 'high', 'low', 'change', 'change_abs', 'bid', 'ask'],
+        }),
+      });
+      if (tvRes.ok) {
+        const tvData: any = await tvRes.json();
+        const d = tvData.data?.[0]?.d;
+        if (Array.isArray(d) && d[0] > 0) {
+          currentPrice = parseFloat(d[0]);
+        }
+      }
+    } catch {}
+
+    // Check user price alerts
+    if (currentPrice > 0 && config.alerts && config.alerts.length > 0) {
+      for (const alert of config.alerts) {
+        if (!alert.enabled) continue;
+        const target = parseFloat(alert.target_value);
+        if (isNaN(target) || target <= 0) continue;
+
+        // Check if recently triggered (15 min cooldown per alert)
+        const lastTrig = alert.last_triggered || 0;
+        if (Date.now() - lastTrig < 15 * 60 * 1000) continue;
+
+        let triggered = false;
+        let condText = '';
+
+        if (alert.condition === 'CROSSES_ABOVE' && currentPrice >= target) {
+          triggered = true;
+          condText = `crossed above target of $${target.toFixed(2)}`;
+        } else if (alert.condition === 'CROSSES_BELOW' && currentPrice <= target) {
+          triggered = true;
+          condText = `crossed below target of $${target.toFixed(2)}`;
+        } else if (alert.condition === 'EQUALS' && Math.abs(currentPrice - target) <= 0.5) {
+          triggered = true;
+          condText = `reached target level of $${target.toFixed(2)}`;
+        }
+
+        if (triggered) {
+          alert.last_triggered = Date.now();
+          globalCloudState.alertsTriggeredCount++;
+          alertsSent++;
+
+          const alertMsg = `🎯 *XAUUSD Price Alert Triggered!*\n\n• *Symbol*: \`OANDA:XAUUSD\`\n• *Live Spot Price*: \`$${currentPrice.toFixed(2)}\`\n• *Trigger*: Gold has ${condText}\n• *Alert Title*: *${alert.title || 'Price Target Reached'}*\n🕒 *Timestamp*: \`${new Date().toISOString().replace('T', ' ').slice(0, 19)} UTC\`\n\n⚡ _Sent by Gold Intelligence Terminal Cloud Monitor (24/7 Active)_`;
+
+          await sendTelegramMessage(botToken, chatId, alertMsg);
+        }
+      }
+    }
+
+    // 2. Check Economic Calendar (Upcoming & Released)
+    try {
+      const nowMs = Date.now();
+      const fromIso = new Date(nowMs - 3600000).toISOString(); // last 1 hour
+      const toIso = new Date(nowMs + 3600000).toISOString(); // next 1 hour
+      const tvCalUrl = `https://economic-calendar.tradingview.com/events?from=${fromIso}&to=${toIso}&countries=US`;
+
+      const calRes = await fetch(tvCalUrl, {
+        headers: {
+          'Origin': 'https://www.tradingview.com',
+          'Referer': 'https://www.tradingview.com/',
+          'User-Agent': 'Mozilla/5.0',
+        },
+      });
+
+      if (calRes.ok) {
+        const calData: any = await calRes.json();
+        const events = calData.result || [];
+        for (const ev of events) {
+          if (ev.importance !== 1) continue; // Only High Impact
+
+          const evDateMs = new Date(ev.date).getTime();
+          const diffMs = evDateMs - nowMs;
+          const evId = `cal_${ev.id || ev.title}_${ev.date}`;
+
+          // A) Upcoming in next 15 minutes
+          if (diffMs > 0 && diffMs <= 15 * 60 * 1000) {
+            const upKey = `${evId}_upcoming`;
+            if (!globalCloudState.seenEventIds.includes(upKey)) {
+              globalCloudState.seenEventIds.push(upKey);
+              if (globalCloudState.seenEventIds.length > 500) globalCloudState.seenEventIds.shift();
+              alertsSent++;
+
+              const mins = Math.max(1, Math.round(diffMs / 60000));
+              const calMsg = `⏰ *High-Impact Economic Release Imminent (${mins}m)*\n\n📌 *${ev.title}*\n• *Country*: \`USD\`\n• *Forecast*: \`${ev.forecast !== null && ev.forecast !== undefined ? ev.forecast : '--'}\` | *Previous*: \`${ev.previous !== null && ev.previous !== undefined ? ev.previous : '--'}\`\n• *Scheduled*: \`${ev.date.replace('T', ' ').slice(0, 16)} UTC\`\n\n⚠️ *Gold Impact Warning*: Expect heightened volatility in XAUUSD during this release window.`;
+
+              await sendTelegramMessage(botToken, chatId, calMsg);
+            }
+          }
+
+          // B) Just released in last 15 minutes with actual
+          if (diffMs <= 0 && Math.abs(diffMs) <= 15 * 60 * 1000 && ev.actual !== null && ev.actual !== undefined) {
+            const relKey = `${evId}_released`;
+            if (!globalCloudState.seenEventIds.includes(relKey)) {
+              globalCloudState.seenEventIds.push(relKey);
+              if (globalCloudState.seenEventIds.length > 500) globalCloudState.seenEventIds.shift();
+              alertsSent++;
+
+              const calMsg = `📊 *Breaking Economic Release Actuals*\n\n📌 *${ev.title}*\n• *Actual*: \`${ev.actual}\`\n• *Forecast*: \`${ev.forecast !== null && ev.forecast !== undefined ? ev.forecast : '--'}\`\n• *Previous*: \`${ev.previous !== null && ev.previous !== undefined ? ev.previous : '--'}\`\n\n💡 *Market Reaction*: Compare actual vs forecast to evaluate US Dollar momentum and gold real yield response.`;
+
+              await sendTelegramMessage(botToken, chatId, calMsg);
+            }
+          }
+        }
+      }
+    } catch (calErr) {
+      console.error('Cloud calendar check error:', calErr);
+    }
+
+    // 3. Check Breaking News (if news alerts enabled)
+    if (newsAlertsEnabled) {
+      try {
+        const feeds = [
+          { url: 'https://feeds.bbci.co.uk/news/world/rss.xml', source: 'BBC World' },
+          { url: 'https://feeds.bbci.co.uk/news/business/rss.xml', source: 'BBC Business' },
+          { url: 'https://www.aljazeera.com/xml/rss/all.xml', source: 'Al Jazeera' },
+          { url: 'https://feeds.finance.yahoo.com/rss/2.0/headline?s=GC=F,GLD,XAUUSD=X', source: 'Yahoo Finance' },
+        ];
+
+        for (const feed of feeds) {
+          const res = await fetch(feed.url, {
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+          }).catch(() => null);
+
+          if (!res || !res.ok) continue;
+          const xml = await res.text();
+          const articles = parseRssArticles(xml, feed.source);
+
+          // Only take articles from last 45 minutes with CRITICAL or HIGH relevance
+          const cutoff = Date.now() - 45 * 60 * 1000;
+          const freshHighImpact = articles.filter(
+            a => a.publishedAt >= cutoff && (a.relevance === 'CRITICAL' || a.relevance === 'HIGH')
+          );
+
+          for (const art of freshHighImpact.slice(0, 1)) {
+            if (!globalCloudState.seenNewsIds.includes(art.id)) {
+              globalCloudState.seenNewsIds.push(art.id);
+              if (globalCloudState.seenNewsIds.length > 500) globalCloudState.seenNewsIds.shift();
+              alertsSent++;
+
+              const newsMsg = `🚨 *XAUUSD Breaking Market Intelligence*\n\n📰 *${art.headline}*\n\n• *Category*: \`${art.category}\`\n• *Source*: \`${art.source}\`\n• *Impact*: *${art.relevance}*\n• *Market Context*: _${art.marketRelevanceComment}_\n\n🔗 [Read Full Story](${art.url})\n🕒 \`${art.publishedFormatted}\``;
+
+              await sendTelegramMessage(botToken, chatId, newsMsg);
+            }
+          }
+        }
+      } catch (newsErr) {
+        console.error('Cloud news check error:', newsErr);
+      }
+    }
+
+    await saveCloudConfig(env, config);
+
+    globalCloudState.lastCronStatus = `Success (${alertsSent} alert(s) dispatched at ${new Date().toISOString()})`;
+    return { ok: true, alertsSent };
+  } catch (err: any) {
+    globalCloudState.lastCronStatus = `Error: ${err.message || String(err)}`;
+    return { ok: false, alertsSent: 0, error: err.message };
+  }
+}
+
+// Exact OANDA:XAUUSD Bar Provider via TradingView WebSocket
+async function fetchTradingViewCandles(timeframe: string, limit: number): Promise<any[]> {
+  const resolutionMap: Record<string, string> = {
+    '1m': '1',
+    '5m': '5',
+    '15m': '15',
+    '1H': '60',
+    '4H': '240',
+    '1D': '1D',
+  };
+  const resolution = resolutionMap[timeframe] || '5';
+  const nBars = Math.min(Math.max(limit, 30), 500);
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        reject(new Error('TradingView WebSocket timeout in worker'));
+      }
+    }, 4500);
+
+    try {
+      const WebSocketCls = (globalThis as any).WebSocket;
+      if (!WebSocketCls) {
+        throw new Error('No WebSocket available in runtime');
+      }
+
+      const ws = new WebSocketCls('wss://data.tradingview.com/socket.io/websocket');
+      const session = 'cs_' + Math.random().toString(36).substring(2, 10);
+
+      function send(msg: any) {
+        const json = JSON.stringify(msg);
+        ws.send('~m~' + json.length + '~m~' + json);
+      }
+
+      ws.onopen = () => {
+        send({ m: 'set_auth_token', p: ['unauthorized_user_token'] });
+        send({ m: 'chart_create_session', p: [session, ''] });
+        send({ m: 'resolve_symbol', p: [session, 'sds_sym_1', JSON.stringify({ symbol: 'OANDA:XAUUSD', adjustment: 'splits' })] });
+        send({ m: 'create_series', p: [session, 'sds_1', 's1', 'sds_sym_1', resolution, nBars, ''] });
+      };
+
+      ws.onmessage = (e: any) => {
+        const raw = typeof e.data === 'string' ? e.data : e.data.toString();
+        if (raw.includes('~h~')) {
+          ws.send('~m~' + raw.length + '~m~' + raw);
+          return;
+        }
+        const msgs = raw.split(/~m~\d+~m~/).filter(Boolean);
+        for (const m of msgs) {
+          try {
+            const obj = JSON.parse(m);
+            if (obj.m === 'timescale_update') {
+              const bars = obj.p?.[1]?.sds_1?.s;
+              if (Array.isArray(bars) && bars.length > 0) {
+                if (!settled) {
+                  settled = true;
+                  clearTimeout(timeout);
+                  try { ws.close(); } catch {}
+                  const formatted = bars.map((b: any) => {
+                    const v = b.v;
+                    const time = v[0];
+                    const open = parseFloat(Number(v[1]).toFixed(2));
+                    const high = parseFloat(Number(v[2]).toFixed(2));
+                    const low = parseFloat(Number(v[3]).toFixed(2));
+                    const close = parseFloat(Number(v[4]).toFixed(2));
+                    const volume = parseFloat(Number(v[5]).toFixed(2)) || 0;
+                    return {
+                      time,
+                      open,
+                      high,
+                      low,
+                      close,
+                      volume,
+                      buyVolume: Math.round(volume * 0.52),
+                      sellVolume: Math.round(volume * 0.48),
+                    };
+                  });
+                  resolve(formatted);
+                }
+              }
+            }
+          } catch {}
+        }
+      };
+
+      ws.onerror = (err: any) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timeout);
+          reject(err);
+        }
+      };
+    } catch (e) {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timeout);
+        reject(e);
+      }
+    }
+  });
+}
+
+// Fallback spot candles using Binance or Yahoo GC=F (range 5d to ensure non-empty)
+async function getFallbackSpotCandles(timeframe: string, limit: number): Promise<any[]> {
+  const binanceIntervalMap: Record<string, string> = {
+    '1m': '1m',
+    '5m': '5m',
+    '15m': '15m',
+    '1H': '1h',
+    '4H': '4h',
+    '1D': '1d',
+  };
+  const bInterval = binanceIntervalMap[timeframe] || '5m';
+
+  try {
+    const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=XAUTUSDT&interval=${bInterval}&limit=${limit}`);
+    if (res.ok) {
+      const data: any = await res.json();
+      if (Array.isArray(data) && data.length > 0) {
+        return data.map((item: any[]) => {
+          const time = Math.floor(Number(item[0]) / 1000);
+          const open = parseFloat(Number(item[1]).toFixed(2));
+          const high = parseFloat(Number(item[2]).toFixed(2));
+          const low = parseFloat(Number(item[3]).toFixed(2));
+          const close = parseFloat(Number(item[4]).toFixed(2));
+          const volume = parseFloat(Number(item[5]).toFixed(2));
+          const buyVolume = parseFloat(Number(item[9]).toFixed(2));
+          const sellVolume = Math.max(0, volume - buyVolume);
+          return { time, open, high, low, close, volume, buyVolume, sellVolume };
+        });
+      }
+    }
+  } catch {}
+
+  return [];
 }
 

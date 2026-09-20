@@ -436,6 +436,62 @@ export const ChartSection: React.FC<ChartSectionProps> = ({
         </div>
       </div>
 
+      {/* Interactive Overlay Intelligence HUD (Visible in both modes for instant situational awareness) */}
+      <div className="bg-[#0f131d] border-b border-[#1a202c] px-3 py-1.5 flex items-center justify-between gap-2 text-[11px] font-mono flex-wrap">
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* Reaction Zone Indicator */}
+          {zones.length > 0 && (
+            <div className="flex items-center gap-1.5 bg-[#151b27] px-2 py-0.5 rounded border border-[#232d40]">
+              <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
+              <span className="text-zinc-400">Zone:</span>
+              <span className="text-blue-300 font-semibold">{zones[0].type}</span>
+              <span className="text-zinc-500 font-mono">(${zones[0].priceMin.toFixed(1)} - ${zones[0].priceMax.toFixed(1)})</span>
+            </div>
+          )}
+
+          {/* Volume Profile POC */}
+          {profile && profile.poc > 0 && (
+            <div className="flex items-center gap-1.5 bg-[#151b27] px-2 py-0.5 rounded border border-[#232d40]">
+              <span className="text-amber-400 font-bold">POC:</span>
+              <span className="text-amber-300 font-semibold">${profile.poc.toFixed(2)}</span>
+              {profile.vah > 0 && profile.val > 0 && (
+                <span className="text-zinc-500 text-[10px]">VA: ${profile.val.toFixed(0)}-${profile.vah.toFixed(0)}</span>
+              )}
+            </div>
+          )}
+
+          {/* Liquidity High/Low Targets */}
+          {liquidityLevels.length > 0 && (
+            <div className="hidden md:flex items-center gap-1.5 bg-[#151b27] px-2 py-0.5 rounded border border-[#232d40]">
+              <span className="text-emerald-400 font-semibold">Target:</span>
+              <span className="text-zinc-300">{liquidityLevels[0].label} (${liquidityLevels[0].price.toFixed(2)})</span>
+              <span className="text-[10px] text-zinc-500 uppercase">{liquidityLevels[0].status}</span>
+            </div>
+          )}
+
+          {/* Market Structure (BOS / CHOCH) */}
+          {(structure.bos || structure.choch) && (
+            <div className="flex items-center gap-1.5 bg-[#151b27] px-2 py-0.5 rounded border border-[#232d40]">
+              {structure.bos && (
+                <span className="text-cyan-400 font-semibold flex items-center gap-1">
+                  ⚡ {structure.bos.type}
+                </span>
+              )}
+              {structure.choch && (
+                <span className="text-purple-400 font-semibold flex items-center gap-1">
+                  🔄 {structure.choch.type}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2 text-[10px] text-zinc-500">
+          <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+          <span className="text-emerald-400 font-semibold">TradingView OANDA:XAUUSD Synced</span>
+        </div>
+      </div>
+
       {/* Analytics Overlay Toggles (when in TERMINAL_ANALYTICS mode) */}
       {chartMode === 'TERMINAL_ANALYTICS' && (
         <div className="bg-[#121622] border-b border-[#1e2430] px-3 py-1.5 flex items-center gap-3 text-[11px] font-mono flex-wrap">

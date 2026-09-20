@@ -498,6 +498,14 @@ export class AlertEngine {
   private persistRules() {
     try {
       localStorage.setItem('xauusd_terminal_alert_rules', JSON.stringify(this.rules));
+      // Synchronize with Cloudflare 24/7 background worker for continuous cloud monitoring
+      if (typeof fetch !== 'undefined') {
+        fetch('/api/alerts/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ alerts: this.rules }),
+        }).catch(() => {});
+      }
     } catch {
       // Ignore localStorage error
     }

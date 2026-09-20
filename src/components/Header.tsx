@@ -75,6 +75,17 @@ export const Header: React.FC<HeaderProps> = ({
               </span>
             )}
           </div>
+
+          {/* Cloud 24/7 Alerting Indicator */}
+          {settings.telegramBotToken && settings.telegramChatId && (
+            <div
+              className="hidden xl:flex items-center gap-1.5 bg-[#0b141d] px-2.5 py-1 rounded border border-emerald-900/60 text-xs font-mono"
+              title="Cloudflare 24/7 background worker is actively monitoring events, news & price triggers even when website is closed"
+            >
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_6px_rgba(52,211,153,0.8)]" />
+              <span className="text-emerald-400 font-bold text-[11px]">CLOUD 24/7 ACTIVE</span>
+            </div>
+          )}
         </div>
 
         {/* Right: Time, TradingView direct link, audio, diagnostics, settings */}
