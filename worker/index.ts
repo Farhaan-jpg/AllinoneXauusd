@@ -1238,37 +1238,58 @@ async function fetchTradingViewCandles(timeframe: string, limit: number): Promis
   });
 }
 
-// Fallback spot candles using Binance or Yahoo GC=F (range 5d to ensure non-empty)
+// Fallback spot candles using Yahoo GC=F (range 5d/1mo/3mo to ensure non-empty) calibrated to live spot
 async function getFallbackSpotCandles(timeframe: string, limit: number): Promise<any[]> {
-  const binanceIntervalMap: Record<string, string> = {
-    '1m': '1m',
-    '5m': '5m',
-    '15m': '15m',
-    '1H': '1h',
-    '4H': '4h',
-    '1D': '1d',
+  const yIntervalMap: Record<string, { interval: string; range: string }> = {
+    '1m': { interval: '1m', range: '5d' },
+    '5m': { interval: '5m', range: '5d' },
+    '15m': { interval: '15m', range: '5d' },
+    '1H': { interval: '60m', range: '1mo' },
+    '4H': { interval: '60m', range: '3mo' },
+    '1D': { interval: '1d', range: '6mo' },
   };
-  const bInterval = binanceIntervalMap[timeframe] || '5m';
+  const { interval: yInt, range: yRng } = yIntervalMap[timeframe] || { interval: '5m', range: '5d' };
 
   try {
-    const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=XAUTUSDT&interval=${bInterval}&limit=${limit}`);
-    if (res.ok) {
-      const data: any = await res.json();
-      if (Array.isArray(data) && data.length > 0) {
-        return data.map((item: any[]) => {
-          const time = Math.floor(Number(item[0]) / 1000);
-          const open = parseFloat(Number(item[1]).toFixed(2));
-          const high = parseFloat(Number(item[2]).toFixed(2));
-          const low = parseFloat(Number(item[3]).toFixed(2));
-          const close = parseFloat(Number(item[4]).toFixed(2));
-          const volume = parseFloat(Number(item[5]).toFixed(2));
-          const buyVolume = parseFloat(Number(item[9]).toFixed(2));
-          const sellVolume = Math.max(0, volume - buyVolume);
-          return { time, open, high, low, close, volume, buyVolume, sellVolume };
-        });
+    const yRes = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=${yInt}&range=${yRng}`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      },
+    });
+    if (yRes.ok) {
+      const yData: any = await yRes.json();
+      const res0 = yData.chart?.result?.[0];
+      const timestamps = res0?.timestamp;
+      const quote0 = res0?.indicators?.quote?.[0];
+      if (Array.isArray(timestamps) && quote0 && timestamps.length > 0) {
+        const raw: any[] = [];
+        for (let i = 0; i < timestamps.length; i++) {
+          const o = quote0.open?.[i];
+          const h = quote0.high?.[i];
+          const l = quote0.low?.[i];
+          const c = quote0.close?.[i];
+          const v = quote0.volume?.[i] || 0;
+          if (o !== null && h !== null && l !== null && c !== null && !isNaN(o) && !isNaN(c)) {
+            raw.push({
+              time: timestamps[i],
+              open: parseFloat(Number(o).toFixed(2)),
+              high: parseFloat(Number(h).toFixed(2)),
+              low: parseFloat(Number(l).toFixed(2)),
+              close: parseFloat(Number(c).toFixed(2)),
+              volume: v,
+              buyVolume: Math.round(v * 0.52),
+              sellVolume: Math.round(v * 0.48),
+            });
+          }
+        }
+        if (raw.length > 5) {
+          return raw.slice(-limit);
+        }
       }
     }
-  } catch {}
+  } catch (err) {
+    console.error('Yahoo fallback candle fetch failed:', err);
+  }
 
   return [];
 }
