@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Activity, BarChart3, Database, Info, Layers, Waves } from 'lucide-react';
+import { Activity, Database, Info, Layers } from 'lucide-react';
 import { LiquidityLevel, OrderFlowState, VolumeProfile } from '../types/market';
 
 interface LiquidityOrderFlowPanelProps {

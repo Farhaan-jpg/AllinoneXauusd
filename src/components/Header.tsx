@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Activity, Bell, ExternalLink, Moon, Settings, Volume2, VolumeX, Wrench } from 'lucide-react';
+import { Activity, Bell, ExternalLink, Settings, Volume2, VolumeX } from 'lucide-react';
 import { SessionInfo, TerminalSettings } from '../types/market';
 import { SessionEngine } from '../services/engines/sessionEngine';
 

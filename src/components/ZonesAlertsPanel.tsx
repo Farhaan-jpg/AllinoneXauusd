@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { AlertCircle, Bell, Plus, Shield, Target, Trash2, Zap } from 'lucide-react';
+import { Plus, Target, Trash2 } from 'lucide-react';
 import { AlertEvent, AlertRule, TradingZone } from '../types/market';
 
 interface ZonesAlertsPanelProps {
