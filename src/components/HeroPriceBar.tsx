@@ -85,10 +85,10 @@ export const HeroPriceBar: React.FC<HeroPriceBarProps> = ({
           <div className="flex items-center gap-2 flex-wrap text-xs">
             {/* Structure Badge */}
             <div className="bg-[#151a24] border border-[#232b3c] px-2.5 py-1 rounded">
-              <span className="text-[10px] text-zinc-500 mr-1.5 uppercase font-mono">Structure</span>
+              <span className="text-[10px] text-zinc-500 mr-1.5 uppercase font-mono">Structure ({currentTimeframe})</span>
               <span className={`font-semibold font-mono ${
                 structure.trend.includes('Bullish') ? 'text-emerald-400' :
-                structure.trend.includes('Bearish') ? 'text-rose-400' : 'text-zinc-300'
+                structure.trend.includes('Bearish') ? 'text-rose-400' : 'text-amber-300'
               }`}>
                 {structure.trend}
               </span>
@@ -112,9 +112,11 @@ export const HeroPriceBar: React.FC<HeroPriceBarProps> = ({
                   ? 'bg-amber-950/50 border-amber-700 text-amber-300'
                   : 'bg-[#151a24] border-[#232b3c] text-zinc-300'
               }`}>
-                <AlertTriangle className="w-3 h-3" />
+                <AlertTriangle className="w-3 h-3 text-amber-400" />
                 <span className="text-[10px] uppercase font-mono font-bold">
-                  {regime.newsRisk}
+                  {regime.newsRisk === 'CRITICAL EVENT AHEAD'
+                    ? 'CRITICAL EVENT AHEAD'
+                    : `EVENT RISK: ${regime.newsRisk}`}
                 </span>
               </div>
             )}

@@ -1,10 +1,14 @@
-import { Candle, MarketStructureState } from '../../types/market';
+import { Candle, MarketQuote, MarketStructureState } from '../../types/market';
 
 export class StructureEngine {
   /**
    * Identifies swing points, BOS, CHOCH, displacement, and trend from candles
    */
-  public static analyze(candles: Candle[], lookback: number = 3): MarketStructureState {
+  public static analyze(
+    candles: Candle[],
+    lookback: number = 3,
+    quote?: MarketQuote | null
+  ): MarketStructureState {
     if (!candles || candles.length < 15) {
       return {
         trend: 'Neutral',
@@ -46,6 +50,31 @@ export class StructureEngine {
     const highs = swings.filter(s => s.type === 'HIGH');
     const lows = swings.filter(s => s.type === 'LOW');
 
+    // Calculate EMA20 and EMA50 to provide robust trend continuity and prevent false micro-pullback flips
+    let ema20 = 0;
+    let ema50 = 0;
+    const len = candles.length;
+    if (len >= 20) {
+      const k20 = 2 / 21;
+      ema20 = candles[0].close;
+      for (let i = 1; i < len; i++) {
+        ema20 = candles[i].close * k20 + ema20 * (1 - k20);
+      }
+    }
+    if (len >= 50) {
+      const k50 = 2 / 51;
+      ema50 = candles[0].close;
+      for (let i = 1; i < len; i++) {
+        ema50 = candles[i].close * k50 + ema50 * (1 - k50);
+      }
+    } else if (len >= 20) {
+      ema50 = ema20;
+    }
+
+    const currentPrice = candles[len - 1].close;
+    const isEmaBullish = ema20 > 0 && ema50 > 0 && ema20 >= ema50 && currentPrice >= ema50;
+    const isEmaBearish = ema20 > 0 && ema50 > 0 && ema20 <= ema50 && currentPrice <= ema50;
+
     let recentSwing: 'HH' | 'HL' | 'LH' | 'LL' = 'HL';
     let trend: MarketStructureState['trend'] = 'Neutral';
 
@@ -66,38 +95,69 @@ export class StructureEngine {
       } else if (isHigherHigh) {
         trend = 'Bullish';
         recentSwing = 'HH';
+      } else if (isHigherLow && !isLowerHigh) {
+        trend = 'Bullish';
+        recentSwing = 'HL';
       } else if (isLowerLow && isLowerHigh) {
-        trend = 'Strong Bearish';
-        recentSwing = 'LL';
+        // If EMAs are strongly bullish and price is above EMA50, this is a minor pullback/consolidation, NOT a bear trend!
+        if (isEmaBullish) {
+          trend = currentPrice >= ema20 ? 'Bullish' : 'Neutral';
+          recentSwing = 'HL';
+        } else {
+          trend = 'Strong Bearish';
+          recentSwing = 'LL';
+        }
       } else if (isLowerLow) {
-        trend = 'Bearish';
-        recentSwing = 'LL';
+        if (isEmaBullish) {
+          trend = currentPrice >= ema20 ? 'Bullish' : 'Neutral';
+          recentSwing = 'HL';
+        } else {
+          trend = 'Bearish';
+          recentSwing = 'LL';
+        }
       } else if (isLowerHigh) {
-        trend = 'Neutral';
+        trend = isEmaBullish ? 'Bullish' : isEmaBearish ? 'Bearish' : 'Neutral';
         recentSwing = 'LH';
       } else {
-        trend = 'Neutral';
+        trend = isEmaBullish ? 'Bullish' : isEmaBearish ? 'Bearish' : 'Neutral';
         recentSwing = 'HL';
       }
     } else {
       // Linear slope fallback over available candles
-      const firstQuarter = candles.slice(0, Math.floor(candles.length / 4));
-      const lastQuarter = candles.slice(-Math.floor(candles.length / 4));
+      const firstQuarter = candles.slice(0, Math.floor(len / 4));
+      const lastQuarter = candles.slice(-Math.floor(len / 4));
       const avgFirst = firstQuarter.reduce((a, b) => a + b.close, 0) / Math.max(1, firstQuarter.length);
       const avgLast = lastQuarter.reduce((a, b) => a + b.close, 0) / Math.max(1, lastQuarter.length);
       const diff = avgLast - avgFirst;
 
-      if (diff > 2.0) {
+      if (diff > 2.0 || isEmaBullish) {
         trend = 'Strong Bullish';
         recentSwing = 'HH';
       } else if (diff > 0.5) {
         trend = 'Bullish';
         recentSwing = 'HL';
-      } else if (diff < -2.0) {
+      } else if (diff < -2.0 && isEmaBearish) {
         trend = 'Strong Bearish';
         recentSwing = 'LL';
-      } else if (diff < -0.5) {
+      } else if (diff < -0.5 && isEmaBearish) {
         trend = 'Bearish';
+        recentSwing = 'LH';
+      } else {
+        trend = isEmaBullish ? 'Bullish' : isEmaBearish ? 'Bearish' : 'Neutral';
+        recentSwing = isEmaBullish ? 'HL' : 'LH';
+      }
+    }
+
+    // Context filter: If 24h change is strongly positive (+0.4%+) and price is above previous close,
+    // a micro pullback on an intraday timeframe is a consolidation/pullback, never a full Bearish trend
+    if (quote && quote.changePercent24h > 0.4 && currentPrice >= quote.prevClose) {
+      if (trend.includes('Bearish')) {
+        trend = isEmaBullish ? 'Bullish' : 'Neutral';
+        recentSwing = 'HL';
+      }
+    } else if (quote && quote.changePercent24h < -0.4 && currentPrice <= quote.prevClose) {
+      if (trend.includes('Bullish')) {
+        trend = isEmaBearish ? 'Bearish' : 'Neutral';
         recentSwing = 'LH';
       }
     }

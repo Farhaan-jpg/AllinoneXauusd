@@ -368,7 +368,7 @@ export const App: React.FC = () => {
     if (!quote || candles.length < 5) return;
 
     // 1. Structure
-    const newStructure = StructureEngine.analyze(candles);
+    const newStructure = StructureEngine.analyze(candles, 3, quote);
     setStructure(newStructure);
 
     // 2. Liquidity Levels
