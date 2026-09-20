@@ -489,12 +489,8 @@ export const App: React.FC = () => {
           <div className={`${mobileTab === 'OVERVIEW' || mobileTab === 'CHART' ? 'block' : 'hidden lg:block'}`}>
             <ChartSection
               timeframe={currentTimeframe}
-              candles={candles}
-              liquidityLevels={liquidityLevels}
-              profile={volumeProfile}
-              zones={zones}
-              structure={structure}
               quote={quote}
+              onSelectTimeframe={handleSelectTimeframe}
             />
           </div>
         </div>
