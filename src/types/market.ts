@@ -222,6 +222,50 @@ export interface MarketRegime {
   summaryBullets: string[];
 }
 
+export interface MarketBiasVerdict {
+  bias: 'STRONG_BULLISH' | 'BULLISH' | 'NEUTRAL' | 'BEARISH' | 'STRONG_BEARISH';
+  confidenceScore: number; // 0 to 100
+  verdictTitle: string;
+  executiveSummary: string;
+  pillars: {
+    technicals: {
+      score: number; // -100 to +100
+      rating: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+      weight: number;
+      summary: string;
+      details: string[];
+    };
+    macro: {
+      score: number; // -100 to +100
+      rating: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+      weight: number;
+      summary: string;
+      details: string[];
+    };
+    orderflow: {
+      score: number; // -100 to +100
+      rating: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+      weight: number;
+      summary: string;
+      details: string[];
+    };
+    eventRisk: {
+      score: number; // -100 to +100
+      rating: 'LOW_RISK' | 'MODERATE_RISK' | 'HIGH_RISK';
+      weight: number;
+      summary: string;
+      details: string[];
+    };
+  };
+  playbook: {
+    biasAction: string;
+    primaryZone: { label: string; min: number; max: number; type: 'SUPPORT' | 'RESISTANCE' };
+    invalidationPrice: number;
+    targetResistance: number;
+  };
+  updatedAt: number;
+}
+
 export interface AlertRule {
   id: string;
   title: string;

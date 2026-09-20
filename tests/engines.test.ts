@@ -7,6 +7,7 @@ import { SessionEngine } from '../src/services/engines/sessionEngine';
 import { StructureEngine } from '../src/services/engines/structureEngine';
 import { VolatilityEngine } from '../src/services/engines/volatilityEngine';
 import { VolumeProfileEngine } from '../src/services/engines/volumeProfileEngine';
+import { MarketBiasVerdictEngine } from '../src/services/engines/marketBiasVerdictEngine';
 import { newsProvider } from '../src/services/providers/newsProvider';
 import { Candle } from '../src/types/market';
 
@@ -421,6 +422,110 @@ describe('MTFEngine', () => {
     expect(matrix.confluenceScore).toBeGreaterThanOrEqual(70);
     expect(matrix.overallBias).toContain('BULLISH');
     expect(matrix.bullishCount).toBeGreaterThanOrEqual(4);
+  });
+});
+
+describe('MarketBiasVerdictEngine', () => {
+  it('correctly derives STRONG_BULLISH verdict with supportive technicals and macro tailwinds', () => {
+    const mockQuote: any = {
+      price: 4378.38,
+      change24h: 36.55,
+      changePercent24h: 0.84,
+      high24h: 4399.67,
+      low24h: 4334.29,
+    };
+
+    const mockMtf: any = {
+      timeframes: [
+        { timeframe: '1m', trend: 'BULLISH' },
+        { timeframe: '5m', trend: 'BULLISH' },
+        { timeframe: '15m', trend: 'BULLISH' },
+        { timeframe: '1H', trend: 'BULLISH' },
+        { timeframe: '4H', trend: 'BULLISH' },
+        { timeframe: '1D', trend: 'BULLISH' },
+      ],
+      bullishCount: 6,
+      bearishCount: 0,
+      confluenceScore: 92,
+      overallBias: 'STRONG_BULLISH',
+    };
+
+    const mockStructure: any = {
+      trend: 'Strong Bullish',
+      recentSwing: 'HH',
+      displacement: true,
+    };
+
+    const mockMacro: any = {
+      dxy: { price: 100.22, change: -0.18 }, // Softening dollar
+      us10y: { price: 4.98, change: -0.04 },  // Falling yields
+      vix: { price: 19.5 },
+      goldSilverRatio: 65.2,
+      silver: { direction: 'UP', price: 67.15 },
+    };
+
+    const mockOrderFlow: any = {
+      isAvailable: true,
+      delta: 1250,
+      cvd: 4500,
+      aggressiveState: 'Aggressive Buyers',
+      absorptionState: 'Bullish Absorption',
+    };
+
+    const mockVol: any = { regime5m: 'MEDIUM' };
+    const mockZones: any = [
+      { status: 'ACTIVE', priceMin: 4355, priceMax: 4365, label: 'Confluence Demand' },
+      { status: 'ACTIVE', priceMin: 4400, priceMax: 4410, label: 'Confluence Supply' },
+    ];
+
+    const verdict = MarketBiasVerdictEngine.evaluate(
+      mockQuote,
+      mockMtf,
+      mockStructure,
+      mockMacro,
+      mockOrderFlow,
+      mockVol,
+      mockZones,
+      [],
+      []
+    );
+
+    expect(verdict.bias).toBe('STRONG_BULLISH');
+    expect(verdict.confidenceScore).toBeGreaterThanOrEqual(75);
+    expect(verdict.pillars.technicals.rating).toBe('BULLISH');
+    expect(verdict.pillars.macro.rating).toBe('BULLISH');
+    expect(verdict.pillars.orderflow.rating).toBe('BULLISH');
+    expect(verdict.playbook.biasAction).toContain('Favor buy-side');
+  });
+
+  it('correctly adjusts verdict to HIGH_RISK when high-impact event is imminent', () => {
+    const mockQuote: any = { price: 4378.38, changePercent24h: 0.1 };
+    const mockStructure: any = { trend: 'Neutral', recentSwing: 'HL' };
+    const mockVol: any = { regime5m: 'LOW' };
+
+    const imminentEvent: any = [{
+      id: 'e1',
+      title: 'US CPI Inflation YoY',
+      country: 'USD',
+      isHighImpact: true,
+      timestamp: Date.now() + 15 * 60 * 1000, // 15 mins away
+      countdownText: '15m',
+    }];
+
+    const verdict = MarketBiasVerdictEngine.evaluate(
+      mockQuote,
+      null,
+      mockStructure,
+      null,
+      { isAvailable: false } as any,
+      mockVol,
+      [],
+      imminentEvent,
+      []
+    );
+
+    expect(verdict.pillars.eventRisk.rating).toBe('HIGH_RISK');
+    expect(verdict.pillars.eventRisk.summary).toContain('Extreme event risk');
   });
 });
 

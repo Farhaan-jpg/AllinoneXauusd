@@ -9,13 +9,13 @@ class MacroDataProvider {
   private seriesCache: Map<string, { series: number[]; timestamp: number }> = new Map();
 
   private symbols = [
-    { key: 'dxy', ticker: 'DX-Y.NYB', name: 'US Dollar Index', unit: 'pts', defaultPrice: 100.22, defaultChange: 0.03, dir: 'UP' as const },
-    { key: 'us10y', ticker: '%5ETNX', name: 'US 10-Year Yield', unit: '%', defaultPrice: 4.996, defaultChange: 0.049, dir: 'UP' as const },
+    { key: 'dxy', ticker: 'DX-Y.NYB', name: 'US Dollar Index', unit: 'pts', defaultPrice: 100.22, defaultChange: -0.01, dir: 'DOWN' as const },
+    { key: 'us10y', ticker: '%5ETNX', name: 'US 10-Year Yield', unit: '%', defaultPrice: 4.998, defaultChange: 0.049, dir: 'UP' as const },
     { key: 'us02y', ticker: '%5EIRX', name: 'US 2-Year Yield Proxy', unit: '%', defaultPrice: 3.982, defaultChange: 0.017, dir: 'UP' as const },
-    { key: 'vix', ticker: '%5EVIX', name: 'CBOE Volatility Index', unit: 'pts', defaultPrice: 15.42, defaultChange: -2.29, dir: 'DOWN' as const },
-    { key: 'silver', ticker: 'SI=F', name: 'COMEX Silver', unit: 'USD/oz', defaultPrice: 67.15, defaultChange: 0.98, dir: 'UP' as const },
-    { key: 'oil', ticker: 'CL=F', name: 'WTI Crude Oil', unit: 'USD/bbl', defaultPrice: 95.84, defaultChange: -1.11, dir: 'DOWN' as const },
-    { key: 'usdjpy', ticker: 'JPY=X', name: 'USD / JPY', unit: 'JPY', defaultPrice: 156.70, defaultChange: 0.68, dir: 'UP' as const },
+    { key: 'vix', ticker: '%5EVIX', name: 'CBOE Volatility Index', unit: 'pts', defaultPrice: 14.81, defaultChange: -0.61, dir: 'DOWN' as const },
+    { key: 'silver', ticker: 'SI=F', name: 'COMEX Silver', unit: 'USD/oz', defaultPrice: 67.15, defaultChange: 1.05, dir: 'UP' as const },
+    { key: 'oil', ticker: 'CL=F', name: 'WTI Crude Oil', unit: 'USD/bbl', defaultPrice: 96.08, defaultChange: -1.15, dir: 'DOWN' as const },
+    { key: 'usdjpy', ticker: 'JPY=X', name: 'USD / JPY', unit: 'JPY', defaultPrice: 156.85, defaultChange: 0.91, dir: 'UP' as const },
   ];
 
   public async getMacroQuotes(goldPrice?: number): Promise<MacroQuotes> {

@@ -7,6 +7,7 @@ import { Header } from './components/Header';
 import { HeroPriceBar } from './components/HeroPriceBar';
 import { LiquidityOrderFlowPanel } from './components/LiquidityOrderFlowPanel';
 import { MacroPanel } from './components/MacroPanel';
+import { MarketBiasVerdictCard } from './components/MarketBiasVerdictCard';
 import { MarketRegimeCard } from './components/MarketRegimeCard';
 import { MobileNav, MobileTab } from './components/MobileNav';
 import { MTFMatrixPanel } from './components/MTFMatrixPanel';
@@ -17,6 +18,7 @@ import { ZonesAlertsPanel } from './components/ZonesAlertsPanel';
 import { alertEngine } from './services/engines/alertEngine';
 import { CorrelationEngine } from './services/engines/correlationEngine';
 import { LiquidityEngine } from './services/engines/liquidityEngine';
+import { MarketBiasVerdictEngine } from './services/engines/marketBiasVerdictEngine';
 import { MTFEngine, MTFMatrixState } from './services/engines/mtfEngine';
 import { OrderFlowEngine } from './services/engines/orderFlowEngine';
 import { RegimeEngine } from './services/engines/regimeEngine';
@@ -41,6 +43,7 @@ import {
   EconomicEvent,
   LiquidityLevel,
   MacroQuotes,
+  MarketBiasVerdict,
   MarketQuote,
   MarketRegime,
   MarketStructureState,
@@ -205,6 +208,7 @@ export const App: React.FC = () => {
     SessionEngine.getSessionInfo(settings.timezone)
   );
   const [regime, setRegime] = useState<MarketRegime | null>(null);
+  const [marketBiasVerdict, setMarketBiasVerdict] = useState<MarketBiasVerdict | null>(null);
 
   // --- MULTI-TIMEFRAME (MTF) MATRIX STATE (Feature 5) ---
   const [candlesByTf, setCandlesByTf] = useState<Partial<Record<Timeframe, Candle[]>>>({});
@@ -427,6 +431,20 @@ export const App: React.FC = () => {
       quote.price
     );
     setMtfState(newMtf);
+
+    // 11. Overall Market Bias Verdict (Comprehensive 4-Pillar Synthesis)
+    const newVerdict = MarketBiasVerdictEngine.evaluate(
+      quote,
+      newMtf,
+      newStructure,
+      macro,
+      newOrderFlow,
+      newVol,
+      newZones,
+      calendarEvents,
+      newsArticles
+    );
+    setMarketBiasVerdict(newVerdict);
   }, [quote, candles, macro, calendarEvents, newsArticles, profileRange, correlationWindow, settings.telegramBotToken, settings.telegramChatId, settings.telegramNewsAlerts, candlesByTf, currentTimeframe]);
 
   // --- SETTINGS HANDLERS ---
@@ -497,6 +515,9 @@ export const App: React.FC = () => {
 
         {/* OVERVIEW & CONTEXT (Desktop: below chart; Mobile: on OVERVIEW tab) */}
         <div className={`${mobileTab === 'OVERVIEW' ? 'block' : 'hidden lg:block'} space-y-4`}>
+          {/* Overall Market Bias Verdict (Comprehensive 4-Pillar Synthesis) */}
+          <MarketBiasVerdictCard verdict={marketBiasVerdict} />
+
           {/* Regime & Factual Context Summary */}
           <MarketRegimeCard regime={regime} />
 
